@@ -1,2 +1,2 @@
 # optimal-puck
-This is a repo for our implementation that will be winner winner chicken dinner.
+This is a repo for our implementation of an experimental setup to try different algorithms on the LaserHockey environement.  
