@@ -13,7 +13,7 @@ training:
   logging_frequency: 10  # Log training metrics every 10 episodes
   reward_threshold: 200  # Average reward threshold to consider training successful
 
-# Online RL algorithms configurations and sweep settings
+# algorithms configurations and sweep settings
 models:
   dqn:
     wandb_sweep:
