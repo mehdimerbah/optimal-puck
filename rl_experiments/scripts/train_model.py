@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 from datetime import datetime
 from models.dqn import DQNTrainer
+from models.ddpg import DDPGTrainer
 # from models.ppo import PPOTrainer
 
 def parse_args():

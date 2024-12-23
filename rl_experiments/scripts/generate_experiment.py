@@ -25,14 +25,16 @@ class ExperimentGenerator:
         """Create experiment directory structure."""
         directories = [
             'configs',
-            'models',
-            'models/evaluation',
-            'models/evaluation/logs',
+            'logs',
             'results/metrics',
             'results/plots',
-            'results/videos',
-            'logs'
+            'results/gifs',
         ]
+        for model in self.master_config:
+            directories.append(model)
+            directories.append(f'{model}/evaluation')
+            directories.append(f'{model}/evaluation/logs')
+
         for dir_path in directories:
             (experiment_path / dir_path).mkdir(parents=True, exist_ok=True)
 

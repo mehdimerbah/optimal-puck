@@ -21,7 +21,7 @@ class Feedforward(torch.nn.Module):
         self.readout = torch.nn.Linear(self.hidden_sizes[-1], self.output_size)
 
     def forward(self, x):
-        for layer,activation_fun in zip(self.layers, self.activations):
+        for layer,activation_fun in zip(self.layers, self.activations): 
             x = activation_fun(layer(x))
         if self.output_activation is not None:
             return self.output_activation(self.readout(x))
