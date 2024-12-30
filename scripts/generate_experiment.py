@@ -17,7 +17,7 @@ class ExperimentGenerator:
     def _generate_experiment_id(self) -> str:
         """Generate unique experiment ID based on environment, agent type, and timestamp."""
         env_name = self.master_config['environment']['name'].lower()
-        agent_type = 'DQN'
+        agent_type = self.master_config.get('models', {}).keys().__iter__().__next__().upper()
         timestamp = datetime.now().strftime("%Y%m%d_%H%M")
         return f"{env_name}_{agent_type}_{timestamp}"
 
@@ -40,9 +40,10 @@ class ExperimentGenerator:
 
     def _generate_training_config(self) -> dict:
         """Generate training configuration."""
+        model_type = list(self.master_config['models'].keys())[0]  # Get first model type
         return {
             'environment': self.master_config['environment'],
-            'model': self.master_config['models']['dqn'],
+            'model': self.master_config['models'][model_type],
             'training': self.master_config['training']
         }
 
