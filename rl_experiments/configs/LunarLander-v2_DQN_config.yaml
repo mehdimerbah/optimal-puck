@@ -19,7 +19,7 @@ models:
     wandb_sweep:
       method: "grid"
       metric:
-        name: "eval/mean_return"
+        name: "evaluation/mean_return"
         goal: "maximize"
       parameters:
         learning_rate:

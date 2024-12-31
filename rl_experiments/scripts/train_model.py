@@ -12,7 +12,7 @@ def parse_args():
     parser.add_argument('--experiment-id', type=str, required=True,
                         help='Experiment ID (e.g., lunarlander_online_20241212_1600)')
     parser.add_argument('--model-type', type=str, required=True,
-                        choices=['dqn', 'ppo', 'sac'],
+                        choices=['dqn', 'ppo', 'sac', 'ddpg'],
                         help='Type of model to train')
     return parser.parse_args()
 
