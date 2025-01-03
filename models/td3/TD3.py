@@ -195,6 +195,7 @@ class TD3Agent:
             # Exploration
             "eps": 0.1,                # Exploration noise scale
             "noise_beta": 1.0,         # Noise color (0=white, 1=pink, 2=red)
+            "warmup_steps": 25000,     # Number of random steps for initial exploration
             
             # TD3 specific
             "policy_noise": 0.2,       # Target policy smoothing noise
@@ -435,6 +436,8 @@ def main():
                      default=2000, help='Maximum training episodes')
     parser.add_option('-s', '--seed', type='int', dest='seed',
                      default=42, help='Random seed')
+    parser.add_option('-w', '--warmup', type='int', dest='warmup_steps',
+                     default=25000, help='Warm-up steps with random actions')
     
     opts, _ = parser.parse_args()
 
@@ -461,7 +464,8 @@ def main():
         observation_space=env.observation_space,
         action_space=env.action_space,
         eps=opts.eps,
-        learning_rate_actor=opts.lr
+        learning_rate_actor=opts.lr,
+        warmup_steps=opts.warmup_steps
     )
 
     # Training metrics
@@ -470,21 +474,15 @@ def main():
     losses = []
     timestep = 0
 
-    def save_statistics(i_episode):
-        """Saves training statistics to file."""
-        save_path = Path("results") / f"TD3_{env_name}-eps{opts.eps}-t{train_iter}-l{opts.lr}-s{opts.seed}-stat.pkl"
-        save_path.parent.mkdir(exist_ok=True)
-        
-        with open(save_path, 'wb') as f:
-            pickle.dump({
-                "rewards": rewards,
-                "lengths": lengths,
-                "eps": opts.eps,
-                "train_iter": train_iter,
-                "lr": opts.lr,
-                "losses": losses,
-                "episode": i_episode
-            }, f)
+    # Warm-up period with random actions
+    print("Starting warm-up period with random actions...")
+    ob, _ = env.reset()
+    for _ in range(opts.warmup_steps):
+        action = env.action_space.sample()
+        ob_new, reward, done, trunc, _ = env.step(action)
+        agent.store_transition((ob, action, reward, ob_new, done))
+        ob = ob_new if not (done or trunc) else env.reset()[0]
+    print(f"Warm-up complete. Collected {opts.warmup_steps} random transitions.")
 
     # Training loop
     for i_episode in range(1, max_episodes + 1):
