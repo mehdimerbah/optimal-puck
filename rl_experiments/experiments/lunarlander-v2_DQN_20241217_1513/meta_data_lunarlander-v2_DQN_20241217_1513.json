@@ -1,7 +1,0 @@
-{
-    "experiment_id": "lunarlander-v2_DQN_20241217_1513",
-    "created_at": "2024-12-17T15:13:10.755001",
-    "environment": "LunarLander-v2",
-    "model_type": "DQN",
-    "status": "initialized"
-}
