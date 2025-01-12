@@ -162,4 +162,5 @@ cython_debug/
 #.idea/
 
 # Ignore experiments folder
+rl_experiments/experiments/
 experiments/
