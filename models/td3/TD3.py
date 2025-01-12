@@ -81,6 +81,7 @@ class TD3Agent(object):
             "policy_noise": 0.2,       # Target policy smoothing noise
             "noise_clip": 0.5,         # Noise clipping range
             "policy_delay": 2,         # Delayed policy updates
+            "polyak": 0.995,           # Polyak coefficient
             "discount": 0.99,
             "buffer_size": int(1e6),
             "batch_size": 128,
@@ -88,7 +89,6 @@ class TD3Agent(object):
             "learning_rate_critic": 0.0001,
             "hidden_sizes_actor": [128,128],
             "hidden_sizes_critic": [128,128,64],
-            "update_target_every": 100,
             "use_target_net": True
         }
         self._config.update(userconfig)
@@ -142,13 +142,19 @@ class TD3Agent(object):
                       self._action_space.low, 
                       self._action_space.high)
 
+    def _soft_update(self, target, source):
+        """Soft update target network parameters using Polyak averaging."""
+        with torch.no_grad():
+            for target_param, param in zip(target.parameters(), source.parameters()):
+                target_param.data.copy_(
+                    self._config["polyak"] * target_param.data + 
+                    (1.0 - self._config["polyak"]) * param.data
+                )
+
     def train(self, iter_fit=32):
         to_torch = lambda x: torch.from_numpy(x.astype(np.float32)).to(device)
         losses = []
         self.train_iter += 1
-
-        if self._config["use_target_net"] and self.train_iter % self._config["update_target_every"] == 0:
-            self._copy_nets()
 
         for i in range(iter_fit):
             # Sample from replay buffer
@@ -194,10 +200,16 @@ class TD3Agent(object):
                 self.optimizer.step()
                 
                 losses.append(actor_loss.item())
+                
+                if self._config["use_target_net"]:
+                    # Soft update target networks after policy update
+                    self._soft_update(self.Q_target, self.Q)
+                    self._soft_update(self.policy_target, self.policy)
 
         return losses
 
     def _copy_nets(self):
+        """Hard update target networks (only used for initialization)."""
         self.Q_target.load_state_dict(self.Q.state_dict())
         self.policy_target.load_state_dict(self.policy.state_dict())
 
@@ -229,9 +241,6 @@ def main():
     optParser.add_option('-m', '--maxepisodes', action='store', type='float',
                          dest='max_episodes', default=2000,
                          help='Number of episodes (default %default)')
-    optParser.add_option('-u', '--update', action='store', type='float',
-                         dest='update_every', default=100,
-                         help='Number of episodes between target network updates (default %default)')
     optParser.add_option('-s', '--seed', action='store',  type='int',
                          dest='seed', default=42,
                          help='Random seed (default %default)')
@@ -267,8 +276,7 @@ def main():
         observation_space=env.observation_space,
         action_space=env.action_space,
         eps=eps,
-        learning_rate_actor=lr,
-        update_target_every=opts.update_every
+        learning_rate_actor=lr
     )
 
     # Logging variables
@@ -286,7 +294,6 @@ def main():
                 "eps": eps,
                 "train_iter": train_iter,
                 "lr": lr,
-                "update_every": opts.update_every,
                 "losses": losses,
                 "episode": i_episode
             }, f)
@@ -294,7 +301,6 @@ def main():
     # Training loop
     for i_episode in range(1, max_episodes+1):
         ob, _info = env.reset()
-        td3.reset()
         total_reward = 0
 
         for t in range(max_timesteps):
