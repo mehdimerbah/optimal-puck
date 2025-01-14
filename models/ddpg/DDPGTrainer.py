@@ -1,5 +1,7 @@
 import torch
 import numpy as np
+import matplotlib
+matplotlib.use('Agg')
 import pylab as plt
 import gymnasium as gym
 import pickle
@@ -14,13 +16,14 @@ class DDPGTrainer:
     A class for environment interaction, logging, checkpointing, 
     saving statistics, and orchestrating the training loop for DDPG.
     """
-    def __init__(self, env_name, training_config, model_config, experiment_path):
+    def __init__(self, env_name, training_config, model_config, experiment_path, wandb_run=None):
         self.env_name = env_name
         self.env = gym.make(env_name)
         self.training_config = training_config
         self.model_config = model_config
         self.experiment_path = Path(experiment_path)
         self.agent = self._initialize_agent()
+        self.wandb_run = wandb_run
 
         self.rewards = []
         self.lengths = []
@@ -31,11 +34,15 @@ class DDPGTrainer:
         self.results_path = self.experiment_path / "results"
         self.training_stats_path = self.results_path / "training" / "stats"
         self.training_logs_path = self.results_path / "training" / "logs"
+        self.training_plots_path = self.results_path / "training" / "plots"
         self.training_stats_path.mkdir(parents=True, exist_ok=True)
         self.training_logs_path.mkdir(parents=True, exist_ok=True)
+        self.training_plots_path.mkdir(parents=True, exist_ok=True)
+        
 
         # Initialize logger
         self.logger = self._initialize_logger()
+        
 
         # Set random seeds if specified
         self._initialize_seed()
@@ -203,7 +210,7 @@ class DDPGTrainer:
 
         # Adjust layout and show the plots
         plt.tight_layout()
-        plt.savefig(self.training_stats_path / f"DDPG_{self.env_name}_eps{self.model_config['eps']}_alr{float(self.model_config['learning_rate_actor'])}_clr{float(self.model_config['learning_rate_critic'])}_gamma{self.model_config['discount']}_training_plot.png")
+        plt.savefig(self.training_plots_path / f"DDPG_{self.env_name}_eps{self.model_config['eps']}_alr{float(self.model_config['learning_rate_actor'])}_clr{float(self.model_config['learning_rate_critic'])}_gamma{self.model_config['discount']}_training_plot.png")
 
 
     def train(self):
@@ -249,6 +256,15 @@ class DDPGTrainer:
                 self.rewards.append(episode_reward)
                 self.lengths.append(t)
 
+                # Log to wandb
+                if self.wandb_run is not None:
+                    self.wandb_run.log({
+                        "reward": episode_reward,
+                        "length": t
+                        # "q_loss": batch_losses[0],
+                        # "actor_loss": batch_losses[1]
+                    })
+
                 # Save checkpoint & stats periodically
                 if i_episode % save_interval == 0:
                     self._save_checkpoint(i_episode)
@@ -265,4 +281,12 @@ class DDPGTrainer:
             # Final stats saved and plotted
             self._save_statistics()
             self._plot_statistics()
-            return self._final_metrics()
+
+            final_metrics = self._final_metrics()
+
+            if self.wandb_run is not None:
+                self.wandb_run.log({'average_reward': final_metrics['average_reward']})
+                self.wandb_run.summary.update(final_metrics)
+                
+
+            return final_metrics
