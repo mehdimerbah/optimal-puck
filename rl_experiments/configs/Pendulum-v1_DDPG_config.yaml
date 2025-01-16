@@ -1,5 +1,3 @@
-# ddpg_config.yaml
-
 environment:
   name: "Pendulum-v1"
   # If your environment does not require these keys, feel free to remove them
@@ -32,7 +30,7 @@ model:
   wandb_sweep_config:
     method: "grid"
     metric:
-      name: "evaluation/mean_return"
+      name: "average_reward"
       goal: "maximize"
     parameters:
       learning_rate_actor:

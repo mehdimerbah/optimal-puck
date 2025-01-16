@@ -8,6 +8,7 @@ import pickle
 import logging
 import sys
 from pathlib import Path
+from hockey.hockey_env import HockeyEnv_BasicOpponent, Mode
 
 from models.ddpg.DDPG import DDPGAgent
 
@@ -17,8 +18,14 @@ class DDPGTrainer:
     saving statistics, and orchestrating the training loop for DDPG.
     """
     def __init__(self, env_name, training_config, model_config, experiment_path, wandb_run=None):
+        # Initialize the environement
         self.env_name = env_name
-        self.env = gym.make(env_name)
+        if self.env_name == "HockeyEnv":
+            self.env = HockeyEnv_BasicOpponent( mode=Mode.NORMAL,   # or Mode.TRAIN_SHOOTING, Mode.TRAIN_DEFENSE,
+                                               weak_opponent=False)
+        else:
+            self.env = gym.make(env_name)
+
         self.training_config = training_config
         self.model_config = model_config
         self.experiment_path = Path(experiment_path)
