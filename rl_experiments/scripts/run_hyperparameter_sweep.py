@@ -13,8 +13,8 @@ logger = logging.getLogger(__name__)
 TRAINER_MAP = {
     "DDPG": DDPGTrainer,
 }
-EXPERIMENT_ID = "Pendulum-v1_DDPG_20250112_200510"
-EXPERIMENT_PATH = Path("/Users/mehdi/Documents/Tübingen/WiSe24/ReinforcementLearning/Project/optimal-puck/rl_experiments/experiments/Pendulum-v1_DDPG_20250112_200510")
+# EXPERIMENT_ID = "Pendulum-v1_DDPG_20250112_200510"
+# EXPERIMENT_PATH = Path("/Users/mehdi/Documents/Tübingen/WiSe24/ReinforcementLearning/Project/optimal-puck/rl_experiments/experiments/Pendulum-v1_DDPG_20250112_200510")
 
 
 def parse_args():
@@ -43,10 +43,12 @@ def get_hyperparameters(config, model_name):
     return hyperparameter_map
 
 def train_agent(config=None):
+    args = parse_args()
+    experiment_path = Path(f"rl_experiments/experiments/{args.experiment_id}")
     with wandb.init(config=config):
         config = wandb.config
 
-        with open(f"{EXPERIMENT_PATH}/configs/training_config.yaml", "r") as f:
+        with open(f"{experiment_path}/configs/training_config.yaml", "r") as f:
             training_config = yaml.safe_load(f)
         
         trainer_cls = get_trainer(training_config["model"]["name"])
@@ -56,7 +58,7 @@ def train_agent(config=None):
             env_name=training_config["environment"]["name"],
             training_config=training_config["training"],
             model_config=hyperparams,
-            experiment_path=EXPERIMENT_PATH,
+            experiment_path=experiment_path,
             wandb_run=wandb
         )
         trainer.train()
