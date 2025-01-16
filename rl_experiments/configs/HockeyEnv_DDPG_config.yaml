@@ -1,0 +1,54 @@
+environment:
+  name: "HockeyEnv"
+  # If your environment does not require these keys, feel free to remove them
+  max_episode_steps: 200
+  
+training:
+  max_episodes: 2000        # Number of training episodes
+  max_timesteps: 250        # Max timesteps per episode
+  seed: 42                  # Random seed for reproducibility
+  log_interval: 20          # Print avg reward every 20 episodes
+  save_interval: 500        # Save model checkpoint every 500 episodes
+  render: false             # Whether to render the environment
+  train_iter: 32            # Number of gradient updates per episode
+
+model:
+  name: "DDPG"
+    # DDPG-specific hyperparameters
+  config:
+    eps: 0.1                      # Noise scale
+    discount: 0.95               # Discount factor
+    buffer_size: 1000000         # Replay buffer size
+    batch_size: 128              # Minibatch size
+    learning_rate_actor: 1e-4
+    learning_rate_critic: 1e-3
+    hidden_sizes_actor: [128, 128]
+    hidden_sizes_critic: [128, 128, 64]
+    update_target_every: 100
+    use_target_net: true
+
+  wandb_sweep_config:
+    method: "grid"
+    metric:
+      name: "average_reward"
+      goal: "maximize"
+    parameters:
+      batch_size:
+        values: [32, 64, 128]
+      buffer_size:
+        values: [1000000]
+      learning_rate_actor:
+        values: [1e-3, 5e-4, 1e-4]
+      learning_rate_critic:
+        values: [1e-3, 5e-4, 1e-4]
+      discount:
+        values: [0.9, 0.95, 0.99]
+      eps:
+        values: [0.05, 0.1, 0.2]
+
+evaluation:
+  n_episodes: 10
+  max_steps_per_episode: 200
+  metrics:
+    - "mean_return"
+    - "episode_length"
