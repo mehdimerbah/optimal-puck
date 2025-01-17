@@ -1,7 +1,13 @@
 import yaml
+import sys
+from pathlib import Path
+
+# Add project root to Python path
+project_root = Path(__file__).resolve().parent.parent
+sys.path.append(str(project_root))
+
 import argparse
 import json
-from pathlib import Path
 from datetime import datetime
 #from models.dqn.DQNTrainer import DQNTrainer
 #from models.ddpg.DDPGTrainer import DDPGTrainer
@@ -77,14 +83,17 @@ def main():
     )
     
     # Train the model
-    print(f"Starting training for {args.model_type}...")
+    print(f"Starting training for {args.model_type}...", flush=True)
+    print(f"Environment: {env_config['name']}", flush=True)
+    print(f"Training config: {training_config}", flush=True)
+    print(f"Model config: {model_config}\n", flush=True)
     metrics = trainer.train()
     
     # Update and save metadata
     save_training_results(metadata_path, args.model_type, metrics)
     
-    print(f"\nTraining completed for {args.model_type}!")
-    print(f"Final metrics: {metrics}")
+    print(f"\nTraining completed for {args.model_type}!", flush=True)
+    print(f"Final metrics: {metrics}", flush=True)
 
 if __name__ == "__main__":
     main()
