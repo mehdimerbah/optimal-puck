@@ -69,14 +69,20 @@ class TD3Trainer:
         best_eval_reward = float('-inf')
         metrics = {'train_rewards': [], 'eval_rewards': [], 'losses': []}
 
+        print("Starting training loop...", flush=True)
         for episode in range(self.training_config['max_episodes']):
+            print(f"Starting episode {episode}...", flush=True)
             state, _ = self.env.reset()
             episode_reward = 0
             episode_losses = []
 
+            # Reset noise process at the start of each episode
+            self.agent.noise.reset()
+
+            print(f"Episode {episode}: Starting step loop...", flush=True)
             for t in range(self.max_steps):
-                # Select action and add exploration noise
-                action = self.agent.act(state)
+                # Select action with exploration noise during training
+                action = self.agent.act(state, eps=self.model_config.get('eps', 0.1))
                 
                 # Execute action
                 next_state, reward, done, truncated, _ = self.env.step(action)
@@ -85,12 +91,13 @@ class TD3Trainer:
                 # Store transition
                 self.agent.store_transition((state, action, reward, next_state, done))
                 
-                # Train agent
+                # Train agent if enough samples
                 if self.agent.buffer.size >= self.model_config['batch_size']:
                     losses = self.agent.train(iter_fit=self.training_config['train_iter'])
                     episode_losses.extend(losses)
                 
                 if done or truncated:
+                    print(f"Episode {episode} finished after {t+1} steps with reward {episode_reward:.2f}", flush=True)
                     break
                     
                 state = next_state
@@ -100,26 +107,33 @@ class TD3Trainer:
             metrics['train_rewards'].append(episode_reward)
             metrics['losses'].extend(episode_losses)
             
-            # Evaluate and log every eval_interval episodes
-            if (episode + 1) % self.training_config['eval_interval'] == 0:
+            # Print training progress every log_interval episodes
+            if episode % self.training_config.get('log_interval', 20) == 0:
+                avg_reward = np.mean(episode_rewards[-100:]) if episode_rewards else episode_reward
+                avg_loss = np.mean(episode_losses) if episode_losses else 0
+                print(f"Episode {episode}: reward={episode_reward:.2f}, avg_reward={avg_reward:.2f}, avg_loss={avg_loss:.4f}", flush=True)
+                
+                # Evaluate policy without exploration noise
+                print(f"Episode {episode}: Starting evaluation...", flush=True)
                 eval_reward = self.evaluate_policy()
                 metrics['eval_rewards'].append(eval_reward)
+                print(f"Evaluation reward: {eval_reward:.2f}", flush=True)
                 
+                # Save if best
                 if eval_reward > best_eval_reward:
                     best_eval_reward = eval_reward
-                    self.save_checkpoint(episode + 1, metrics)
-                
-                print(f"Episode {episode + 1}: Train reward: {episode_reward:.2f}, Eval reward: {eval_reward:.2f}")
-            
-            # Regular progress logging
-            elif (episode + 1) % self.training_config['log_interval'] == 0:
-                print(f"Episode {episode + 1}: Train reward: {episode_reward:.2f}")
+                    print(f"New best evaluation reward: {best_eval_reward:.2f}", flush=True)
+                    self.save_checkpoint(episode, metrics)
             
             # Save checkpoint every save_interval episodes
             if (episode + 1) % self.training_config['save_interval'] == 0:
+                print(f"Saving checkpoint at episode {episode + 1}...", flush=True)
                 self.save_checkpoint(episode + 1, metrics)
 
+            print(f"Episode {episode} completed.", flush=True)
+
         # Save final checkpoint
+        print("Training completed. Saving final checkpoint...", flush=True)
         self.save_checkpoint(self.training_config['max_episodes'], metrics)
         
         # Close environments

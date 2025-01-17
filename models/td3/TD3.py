@@ -18,8 +18,8 @@ import optparse
 import pickle
 from pathlib import Path
 
-from ..baseline.memory import Memory
-from ..baseline.feedforward import Feedforward
+from ..baseline_alt.memory import Memory
+from ..baseline_alt.feedforward import Feedforward
 
 # Global constants
 DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -98,22 +98,18 @@ class ColoredNoiseProcess:
                 std = 1.0
                 print(f"Warning: Using default scaling because of near-zero variance.")
             
-            colored[:, d] = (colored[:, d] - mean) / (std + self.eps)
+            colored[:, d] = self.sigma * (colored[:, d] - mean) / std
         
-        return colored * self.sigma
+        return colored
     
-    def sample(self):
-        """Returns the next noise vector in the sequence."""
+    def __call__(self):
+        """Returns the current noise value and advances the step counter."""
         if self.step_index >= self.episode_length:
             self.reset()
-        
+            
         noise = self.noise_sequences[self.step_index]
         self.step_index += 1
         return noise
-    
-    def __call__(self):
-        """Convenience method for sampling."""
-        return self.sample()
 
 class TwinQFunction(Feedforward):
     """Twin Q-networks for TD3's double Q-learning."""
@@ -190,6 +186,10 @@ class TD3Agent:
         self._action_n = action_space.shape[0]
         self._action_space = action_space
         
+        # Store action bounds on device
+        self._action_low = torch.from_numpy(action_space.low).to(DEVICE)
+        self._action_high = torch.from_numpy(action_space.high).to(DEVICE)
+        
         # Default configuration
         self._config = {
             # Exploration
@@ -233,7 +233,9 @@ class TD3Agent:
     
     def _setup_memory(self):
         """Initializes replay buffer."""
-        self.buffer = Memory(max_size=self._config["buffer_size"])
+        state_dim = self._obs_dim
+        action_dim = self._action_n
+        self.buffer = Memory(max_size=self._config["buffer_size"], state_dim=state_dim, action_dim=action_dim)
     
     def _setup_networks(self):
         """Initializes actor and critic networks."""
@@ -243,18 +245,18 @@ class TD3Agent:
             action_dim=self._action_n,
             hidden_sizes=self._config["hidden_sizes_critic"],
             learning_rate=self._config["learning_rate_critic"]
-        )
+        ).to(DEVICE)
         
         self.Q_target = TwinQFunction(
             observation_dim=self._obs_dim,
             action_dim=self._action_n,
             hidden_sizes=self._config["hidden_sizes_critic"],
             learning_rate=0
-        )
+        ).to(DEVICE)
         
         # Setup actor network
-        high = torch.from_numpy(self._action_space.high)
-        low = torch.from_numpy(self._action_space.low)
+        high = torch.from_numpy(self._action_space.high).to(DEVICE)
+        low = torch.from_numpy(self._action_space.low).to(DEVICE)
         output_activation = lambda x: (torch.tanh(x) * (high - low) / 2) + (high + low) / 2
         
         self.policy = Feedforward(
@@ -263,7 +265,7 @@ class TD3Agent:
             output_size=self._action_n,
             activation_fun=torch.nn.ReLU(),
             output_activation=output_activation
-        )
+        ).to(DEVICE)
         
         self.policy_target = Feedforward(
             input_size=self._obs_dim,
@@ -271,7 +273,7 @@ class TD3Agent:
             output_size=self._action_n,
             activation_fun=torch.nn.ReLU(),
             output_activation=output_activation
-        )
+        ).to(DEVICE)
         
         # Initialize target networks
         self._copy_nets()
@@ -300,16 +302,18 @@ class TD3Agent:
         obs_tensor = torch.from_numpy(observation.astype(np.float32)).to(DEVICE)
         action = self.policy(obs_tensor).detach().cpu().numpy()
         
-        # Add exploration noise
+        # Add exploration noise if not evaluating
         if eps is not None:
             self.noise.sigma = eps
-        noise = self.noise()
+        if eps != 0:  # Only add noise during training
+            noise = self.noise()
+            action = np.clip(
+                action + noise,
+                self._action_space.low,
+                self._action_space.high
+            )
         
-        return np.clip(
-            action + noise,
-            self._action_space.low,
-            self._action_space.high
-        )
+        return action
 
     def _soft_update(self, target, source):
         """
@@ -338,17 +342,17 @@ class TD3Agent:
         Returns:
             list: Training losses
         """
-        to_torch = lambda x: torch.from_numpy(x.astype(np.float32)).to(DEVICE)
+        to_torch = lambda x: torch.from_numpy(x).to(DEVICE)
         losses = []
 
         for i in range(iter_fit):
             # Sample and prepare batch
-            data = self.buffer.sample(batch=self._config['batch_size'])
-            s = to_torch(np.stack(data[:, 0]))
-            a = to_torch(np.stack(data[:, 1]))
-            r = to_torch(np.stack(data[:, 2])[:, None])
-            s_next = to_torch(np.stack(data[:, 3]))
-            done = to_torch(np.stack(data[:, 4])[:, None])
+            states, actions, rewards, next_states, dones = self.buffer.sample(batch=self._config['batch_size'])
+            s = to_torch(states)
+            a = to_torch(actions)
+            r = to_torch(rewards)
+            s_next = to_torch(next_states)
+            done = to_torch(dones)
 
             # Compute target Q-values
             with torch.no_grad():
@@ -363,8 +367,8 @@ class TD3Agent:
                 next_action = self.policy_target(s_next) + noise
                 next_action = torch.clamp(
                     next_action,
-                    torch.from_numpy(self._action_space.low),
-                    torch.from_numpy(self._action_space.high)
+                    self._action_low,
+                    self._action_high
                 )
 
                 # Use minimum of twin Q-values
