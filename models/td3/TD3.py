@@ -15,7 +15,6 @@ import numpy as np
 import gymnasium as gym
 from gymnasium import spaces
 import optparse
-import pickle
 from pathlib import Path
 
 from ..baseline_alt.memory import Memory
@@ -111,51 +110,58 @@ class ColoredNoiseProcess:
         self.step_index += 1
         return noise
 
-class TwinQFunction(Feedforward):
+class TwinQFunction(torch.nn.Module):
     """Twin Q-networks for TD3's double Q-learning."""
-    def __init__(self, observation_dim, action_dim, hidden_sizes=[100,100],
-                 learning_rate=0.0002):
-        input_size = observation_dim + action_dim
-        output_size = 1
-        super().__init__(input_size=input_size, 
-                        hidden_sizes=hidden_sizes, 
-                        output_size=output_size)
-        
-        # Second Q-network
-        self.Q2 = Feedforward(input_size=input_size,
-                            hidden_sizes=hidden_sizes,
-                            output_size=output_size)
-        
-        self.optimizer = torch.optim.Adam(list(self.parameters()) + 
-                                        list(self.Q2.parameters()),
-                                        lr=learning_rate,
-                                        eps=0.000001)
-        self.loss = torch.nn.SmoothL1Loss()
+    def __init__(self, observation_dim, action_dim, hidden_sizes=[128, 128, 64],
+                 learning_rate=0.0003, is_target=False):
+        super(TwinQFunction, self).__init__()
+        self.Q1 = Feedforward(input_size=observation_dim + action_dim, hidden_sizes=hidden_sizes, output_size=1)
+        self.Q2 = Feedforward(input_size=observation_dim + action_dim, hidden_sizes=hidden_sizes, output_size=1)
+        self.is_target = is_target
+
+        if not is_target and learning_rate > 0:
+            self.optimizer = torch.optim.Adam(
+                list(self.Q1.parameters()) + list(self.Q2.parameters()),
+                lr=learning_rate,
+                eps=1e-6
+            )
+            self.loss_fn = torch.nn.SmoothL1Loss()
+        else:
+            self.optimizer = None
+            self.loss_fn = torch.nn.SmoothL1Loss()
 
     def fit(self, observations, actions, targets):
+        if self.optimizer is None:
+            raise ValueError("Cannot train target networks.")
+
         self.train()
         self.optimizer.zero_grad()
-        
-        # Get Q-values from both networks
-        pred1 = self.Q_value(observations, actions)
-        pred2 = self.Q2_value(observations, actions)
-        
+
+        # Q1, Q2 predictions
+        q1_pred = self.Q1(torch.cat([observations, actions], dim=1))
+        q2_pred = self.Q2(torch.cat([observations, actions], dim=1))
+
         # Compute loss for both Q-networks
-        loss1 = self.loss(pred1, targets)
-        loss2 = self.loss(pred2, targets)
+        loss1 = self.loss_fn(q1_pred, targets)
+        loss2 = self.loss_fn(q2_pred, targets)
         total_loss = loss1 + loss2
-        
+
+        # Backpropagation and optimization
         total_loss.backward()
+
+        # Gradient clipping
+        torch.nn.utils.clip_grad_norm_(self.Q1.parameters(), max_norm=1.0)
+        torch.nn.utils.clip_grad_norm_(self.Q2.parameters(), max_norm=1.0)
         self.optimizer.step()
+
         return total_loss.item()
 
     def Q_value(self, observations, actions):
-        x = torch.cat([observations, actions], dim=1)
-        return self.forward(x)
+        return self.Q1(torch.cat([observations, actions], dim=1))
 
     def Q2_value(self, observations, actions):
-        x = torch.cat([observations, actions], dim=1)
-        return self.Q2(x)
+
+        return self.Q2(torch.cat([observations, actions], dim=1))
 
 class TD3Agent:
     """
@@ -185,43 +191,43 @@ class TD3Agent:
         self._obs_dim = observation_space.shape[0]
         self._action_n = action_space.shape[0]
         self._action_space = action_space
-        
+
         # Store action bounds on device
         self._action_low = torch.from_numpy(action_space.low).to(DEVICE)
         self._action_high = torch.from_numpy(action_space.high).to(DEVICE)
-        
+
         # Default configuration
         self._config = {
             # Exploration
             "eps": 0.1,                # Exploration noise scale
             "noise_beta": 1.0,         # Noise color (0=white, 1=pink, 2=red)
             "warmup_steps": 25000,     # Number of random steps for initial exploration
-            
+
             # TD3 specific
             "policy_noise": 0.2,       # Target policy smoothing noise
             "noise_clip": 0.5,         # Noise clipping range
             "policy_delay": 2,         # Policy update frequency
             "polyak": 0.995,           # Target network update rate
             "discount": 0.99,          # Reward discount factor
-            
+
             # Architecture
             "buffer_size": int(1e6),
-            "batch_size": 128,
-            "learning_rate_actor": 0.00001,
-            "learning_rate_critic": 0.0001,
+            "batch_size": 256,         # Updated to 256 as per user config
+            "learning_rate_actor": 0.0003,   # Actor learning rate
+            "learning_rate_critic": 0.0003,  # Critic learning rate
             "hidden_sizes_actor": [128,128],
             "hidden_sizes_critic": [128,128,64],
             "use_target_net": True,
             "max_steps": 2000
         }
         self._config.update(config)
-        
+
         # Initialize components
         self._setup_noise()
         self._setup_memory()
         self._setup_networks()
         self._setup_training()
-    
+
     def _setup_noise(self):
         """Initializes exploration noise process."""
         self.noise = ColoredNoiseProcess(
@@ -230,13 +236,13 @@ class TD3Agent:
             sigma=self._config['eps'],
             episode_length=self._config['max_steps']
         )
-    
+
     def _setup_memory(self):
         """Initializes replay buffer."""
         state_dim = self._obs_dim
         action_dim = self._action_n
         self.buffer = Memory(max_size=self._config["buffer_size"], state_dim=state_dim, action_dim=action_dim)
-    
+
     def _setup_networks(self):
         """Initializes actor and critic networks."""
         # Setup critic networks (twin Q-networks)
@@ -244,21 +250,24 @@ class TD3Agent:
             observation_dim=self._obs_dim,
             action_dim=self._action_n,
             hidden_sizes=self._config["hidden_sizes_critic"],
-            learning_rate=self._config["learning_rate_critic"]
+            learning_rate=self._config["learning_rate_critic"],
+            is_target=False
         ).to(DEVICE)
-        
+
+        # Setup target critic networks without optimizer
         self.Q_target = TwinQFunction(
             observation_dim=self._obs_dim,
             action_dim=self._action_n,
             hidden_sizes=self._config["hidden_sizes_critic"],
-            learning_rate=0
+            learning_rate=0,
+            is_target=True
         ).to(DEVICE)
-        
+
         # Setup actor network
         high = torch.from_numpy(self._action_space.high).to(DEVICE)
         low = torch.from_numpy(self._action_space.low).to(DEVICE)
         output_activation = lambda x: (torch.tanh(x) * (high - low) / 2) + (high + low) / 2
-        
+
         self.policy = Feedforward(
             input_size=self._obs_dim,
             hidden_sizes=self._config["hidden_sizes_actor"],
@@ -266,7 +275,8 @@ class TD3Agent:
             activation_fun=torch.nn.ReLU(),
             output_activation=output_activation
         ).to(DEVICE)
-        
+
+        # Setup target actor network without optimizer
         self.policy_target = Feedforward(
             input_size=self._obs_dim,
             hidden_sizes=self._config["hidden_sizes_actor"],
@@ -274,19 +284,21 @@ class TD3Agent:
             activation_fun=torch.nn.ReLU(),
             output_activation=output_activation
         ).to(DEVICE)
-        
+
         # Initialize target networks
         self._copy_nets()
-    
-    def _setup_training(self):
-        """Initializes training-related components."""
-        self.optimizer = torch.optim.Adam(
+
+        # Initialize separate optimizer for actor only
+        self.actor_optimizer = torch.optim.Adam(
             self.policy.parameters(),
             lr=self._config["learning_rate_actor"],
-            eps=0.000001
+            eps=1e-6
         )
+
+    def _setup_training(self):
+        """Initializes training-related components."""
         self.train_iter = 0
-    
+
     def act(self, observation, eps=None):
         """
         Selects action using the current policy and exploration noise.
@@ -300,7 +312,8 @@ class TD3Agent:
         """
         self.policy.eval()
         obs_tensor = torch.from_numpy(observation.astype(np.float32)).to(DEVICE)
-        action = self.policy(obs_tensor).detach().cpu().numpy()
+        with torch.no_grad():
+            action = self.policy(obs_tensor).cpu().numpy()
         
         # Add exploration noise if not evaluating
         if eps is not None:
@@ -335,14 +348,14 @@ class TD3Agent:
     def train(self, iter_fit=32):
         """
         Performs training iterations using sampled transitions.
-        
+
         Args:
             iter_fit (int): Number of training iterations
-            
+
         Returns:
             list: Training losses
         """
-        to_torch = lambda x: torch.from_numpy(x).to(DEVICE)
+        to_torch = lambda x: torch.from_numpy(x).float().to(DEVICE)
         losses = []
 
         for i in range(iter_fit):
@@ -350,9 +363,14 @@ class TD3Agent:
             states, actions, rewards, next_states, dones = self.buffer.sample(batch=self._config['batch_size'])
             s = to_torch(states)
             a = to_torch(actions)
-            r = to_torch(rewards)
+            r = to_torch(rewards).view(-1, 1)
             s_next = to_torch(next_states)
-            done = to_torch(dones)
+            done = to_torch(dones).view(-1, 1)
+
+            # Normalize rewards
+            r_mean = r.mean()
+            r_std = r.std() + 1e-8
+            r_normalized = (r - r_mean) / r_std
 
             # Compute target Q-values
             with torch.no_grad():
@@ -377,23 +395,28 @@ class TD3Agent:
                 q_next = torch.min(q1_next, q2_next)
                 
                 # Compute targets
-                q_target = r + self._config["discount"] * (1 - done) * q_next
+                q_target = r_normalized + self._config["discount"] * (1 - done) * q_next
 
             # Update critic
+            q_target = q_target.view(-1, 1)
             q_loss = self.Q.fit(s, a, q_target)
             losses.append(q_loss)
 
             # Delayed policy updates
             if i % self._config["policy_delay"] == 0:
-                # Update actor
+                # Update actor using actor_optimizer
+                self.policy.train()
                 a_pred = self.policy(s)
+                # Q_value returns shape
                 actor_loss = -self.Q.Q_value(s, a_pred).mean()
-                
-                self.optimizer.zero_grad()
+
+                self.actor_optimizer.zero_grad()
                 actor_loss.backward()
-                self.optimizer.step()
+                # Implement gradient clipping for actor
+                torch.nn.utils.clip_grad_norm_(self.policy.parameters(), max_norm=1.0)
+                self.actor_optimizer.step()
                 losses.append(actor_loss.item())
-                
+
                 # Update target networks
                 if self._config["use_target_net"]:
                     self._soft_update(self.Q_target, self.Q)
@@ -403,7 +426,8 @@ class TD3Agent:
 
     def _copy_nets(self):
         """Performs hard update of target networks (used for initialization)."""
-        self.Q_target.load_state_dict(self.Q.state_dict())
+        self.Q_target.Q1.load_state_dict(self.Q.Q1.state_dict())
+        self.Q_target.Q2.load_state_dict(self.Q.Q2.state_dict())
         self.policy_target.load_state_dict(self.policy.state_dict())
 
     def store_transition(self, transition):
@@ -433,9 +457,11 @@ def main():
     parser.add_option('-n', '--eps', type='float', dest='eps',
                      default=0.1, help='Exploration noise scale')
     parser.add_option('-t', '--train', type='int', dest='train',
-                     default=32, help='Training iterations per episode')
-    parser.add_option('-l', '--lr', type='float', dest='lr',
-                     default=0.0001, help='Actor learning rate')
+                     default=8, help='Training iterations per episode')
+    parser.add_option('-l', '--lr_actor', type='float', dest='lr_actor',
+                     default=0.0003, help='Actor learning rate')
+    parser.add_option('-c', '--lr_critic', type='float', dest='lr_critic',
+                     default=0.0003, help='Critic learning rate')
     parser.add_option('-m', '--maxepisodes', type='float', dest='max_episodes',
                      default=2000, help='Maximum training episodes')
     parser.add_option('-s', '--seed', type='int', dest='seed',
@@ -447,11 +473,11 @@ def main():
 
     # Environment setup
     env_name = opts.env_name
-    env = gym.make(env_name, continuous=True) if env_name == "LunarLander-v2" else gym.make(env_name)
+    env = gym.make(env_name)
 
     # Training parameters
     max_episodes = int(opts.max_episodes)
-    max_timesteps = 2000
+    max_timesteps = env.spec.max_episode_steps if hasattr(env.spec, 'max_episode_steps') else 2000
     train_iter = opts.train
     log_interval = 20
     render = False
@@ -468,7 +494,8 @@ def main():
         observation_space=env.observation_space,
         action_space=env.action_space,
         eps=opts.eps,
-        learning_rate_actor=opts.lr,
+        learning_rate_actor=opts.lr_actor,
+        learning_rate_critic=opts.lr_critic,
         warmup_steps=opts.warmup_steps
     )
 
@@ -530,9 +557,11 @@ def main():
         if i_episode % log_interval == 0:
             avg_reward = np.mean(rewards[-log_interval:])
             avg_length = int(np.mean(lengths[-log_interval:]))
+            avg_loss = np.mean(losses[-log_interval:]) if len(losses) >= log_interval else np.mean(losses)
             print(f"Episode {i_episode}\t "
                   f"avg length: {avg_length}\t "
-                  f"avg reward: {avg_reward:.2f}")
+                  f"avg reward: {avg_reward:.2f}\t "
+                  f"avg loss: {avg_loss:.4f}")
 
     # Final save
     save_statistics(i_episode)
