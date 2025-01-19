@@ -1,11 +1,11 @@
 environment:
-  name: "HockeyEnv"
-  max_episode_steps: 250
+  name: "CarRacing-v3"
+  max_episode_steps: 1600
   
 training:
-  max_episodes: 2000        
-  max_timesteps: 250        
-  seed: 42                  
+  max_episodes: 1000        
+  max_timesteps: 1600       
+  seed: 42                 
   log_interval: 20          
   save_interval: 500        
   render: false             
@@ -16,7 +16,7 @@ model:
     # DDPG-specific hyperparameters
   config:
     eps: 0.1                      # Noise scale
-    discount: 0.95               
+    discount: 0.95              
     buffer_size: 1000000         
     batch_size: 128              
     learning_rate_actor: 1e-4
@@ -27,7 +27,7 @@ model:
     use_target_net: true
 
   wandb_sweep_config:
-    name: "HockeyEnv_DDPG"
+    name: "BipedalWalker-v3_DDPG"
     method: "grid"
     metric:
       name: "average_reward"
@@ -42,7 +42,7 @@ model:
       learning_rate_critic:
         values: [1e-3, 5e-4, 1e-4]
       discount:
-        values: [0.9, 0.95, 0.99]
+        values: [0.95, 0.99]
       eps:
         values: [0.05, 0.1, 0.2]
 

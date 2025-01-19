@@ -22,7 +22,9 @@ class DDPGTrainer:
         self.env_name = env_name
         if self.env_name == "HockeyEnv":
             self.env = HockeyEnv_BasicOpponent( mode=Mode.NORMAL,   # or Mode.TRAIN_SHOOTING, Mode.TRAIN_DEFENSE,
-                                               weak_opponent=False)
+                                               weak_opponent=True)
+        elif self.env_name == "BipedalWalker-v3":
+            self.env = gym.make(env_name, hardcore=False, render_mode="rgb_array")
         else:
             self.env = gym.make(env_name)
 

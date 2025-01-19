@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-
 import os
 import yaml
 import json
@@ -30,14 +28,6 @@ class ExperimentGenerator:
         for directory in [self.top_level_dir, self.configs_dir, self.experiments_dir, self.scripts_dir]:
             directory.mkdir(parents=True, exist_ok=True)
 
-        # Optionally create an empty README and requirements.txt if they don't exist
-        readme_path = self.top_level_dir / "README.md"
-        if not readme_path.exists():
-            readme_path.write_text("# RL Experiments\n\nDocumentation goes here.\n")
-
-        req_path = self.top_level_dir / "requirements.txt"
-        if not req_path.exists():
-            req_path.write_text("# Add your Python dependencies here.\n")
 
     def _generate_experiment_id(self) -> str:
         """
