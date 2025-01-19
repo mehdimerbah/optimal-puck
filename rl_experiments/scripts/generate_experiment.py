@@ -127,7 +127,7 @@ class ExperimentGenerator:
             'experiment_id': experiment_id,
             'created_at': datetime.now().isoformat(),
             'environment': self.master_config['environment']['name'],
-            'agent_type': 'dqn',  # or read from config if multiple
+            'agent_type': self.master_config['model']['name'],  # or read from config if multiple
             'status': 'initialized'
         }
         meta_file = experiment_path / f"meta_data_{experiment_id}.json"
