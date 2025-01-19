@@ -1,0 +1,15 @@
+Bootstrap: docker
+From: python:3.11-slim
+
+%files
+    requirements.txt /opt/requirements.txt
+
+%post
+    pip install --no-cache-dir -r /opt/requirements.txt
+
+%environment
+    export LC_ALL=C
+    export PYTHONPATH=/opt/optimal-puck:$PYTHONPATH
+
+%runscript
+    python "$@"
