@@ -1,6 +1,0 @@
-max_steps_per_episode: 1000
-metrics:
-- mean_return
-- success_rate
-- episode_length
-n_episodes: 10
