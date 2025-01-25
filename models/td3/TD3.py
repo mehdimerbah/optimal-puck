@@ -11,6 +11,7 @@ Key Features:
 """
 
 import torch
+import torch.nn as nn
 import numpy as np
 import gymnasium as gym
 from gymnasium import spaces
@@ -23,6 +24,10 @@ from ..baseline_alt.feedforward import Feedforward
 # Global constants
 DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 torch.set_num_threads(1)
+
+class UnsupportedSpace(Exception):
+    """Exception raised when observation or action space is unsupported."""
+    pass
 
 class ColoredNoiseProcess:
     """
@@ -110,7 +115,7 @@ class ColoredNoiseProcess:
         self.step_index += 1
         return noise
 
-class TwinQFunction(torch.nn.Module):
+class TwinQFunction(nn.Module):
     """Twin Q-networks for TD3's double Q-learning."""
     def __init__(self, observation_dim, action_dim, hidden_sizes=[128, 128, 64],
                  learning_rate=0.0003, is_target=False):
@@ -125,13 +130,10 @@ class TwinQFunction(torch.nn.Module):
                 lr=learning_rate,
                 eps=1e-6
             )
-            self.loss_fn = torch.nn.SmoothL1Loss()
-        else:
-            self.optimizer = None
-            self.loss_fn = torch.nn.SmoothL1Loss()
+        self.loss_fn = nn.SmoothL1Loss()
 
     def fit(self, observations, actions, targets):
-        if self.optimizer is None:
+        if self.is_target:
             raise ValueError("Cannot train target networks.")
 
         self.train()
@@ -160,7 +162,6 @@ class TwinQFunction(torch.nn.Module):
         return self.Q1(torch.cat([observations, actions], dim=1))
 
     def Q2_value(self, observations, actions):
-
         return self.Q2(torch.cat([observations, actions], dim=1))
 
 class TD3Agent:
@@ -182,22 +183,22 @@ class TD3Agent:
             **config: Configuration parameters
         """
         # Validate input spaces
-        if not isinstance(observation_space, spaces.box.Box):
-            raise ValueError('Observation space must be continuous (Box)')
-        if not isinstance(action_space, spaces.box.Box):
-            raise ValueError('Action space must be continuous (Box)')
+        if not isinstance(observation_space, spaces.Box):
+            raise UnsupportedSpace("Observation space must be Box.")
+        if not isinstance(action_space, spaces.Box):
+            raise UnsupportedSpace("Action space must be Box.")
 
         # Store space dimensions
-        self._obs_dim = observation_space.shape[0]
-        self._action_n = action_space.shape[0]
-        self._action_space = action_space
+        self.obs_dim = observation_space.shape[0]
+        self.act_dim = action_space.shape[0]
+        self.action_space = action_space
 
         # Store action bounds on device
-        self._action_low = torch.from_numpy(action_space.low).to(DEVICE)
-        self._action_high = torch.from_numpy(action_space.high).to(DEVICE)
+        self.action_low = torch.from_numpy(action_space.low).to(DEVICE)
+        self.action_high = torch.from_numpy(action_space.high).to(DEVICE)
 
         # Default configuration
-        self._config = {
+        self.config = {
             # Exploration
             "eps": 0.1,                # Exploration noise scale
             "noise_beta": 1.0,         # Noise color (0=white, 1=pink, 2=red)
@@ -220,68 +221,66 @@ class TD3Agent:
             "use_target_net": True,
             "max_steps": 2000
         }
-        self._config.update(config)
+        self.config.update(config)
 
         # Initialize components
         self._setup_noise()
         self._setup_memory()
         self._setup_networks()
-        self._setup_training()
+        self.train_iter = 0
 
     def _setup_noise(self):
         """Initializes exploration noise process."""
         self.noise = ColoredNoiseProcess(
-            size=self._action_n,
-            beta=self._config['noise_beta'],
-            sigma=self._config['eps'],
-            episode_length=self._config['max_steps']
+            size=self.act_dim,
+            beta=self.config['noise_beta'],
+            sigma=self.config['eps'],
+            episode_length=self.config['max_steps']
         )
 
     def _setup_memory(self):
         """Initializes replay buffer."""
-        state_dim = self._obs_dim
-        action_dim = self._action_n
-        self.buffer = Memory(max_size=self._config["buffer_size"], state_dim=state_dim, action_dim=action_dim)
+        self.buffer = Memory(max_size=self.config["buffer_size"])
 
     def _setup_networks(self):
         """Initializes actor and critic networks."""
         # Setup critic networks (twin Q-networks)
         self.Q = TwinQFunction(
-            observation_dim=self._obs_dim,
-            action_dim=self._action_n,
-            hidden_sizes=self._config["hidden_sizes_critic"],
-            learning_rate=self._config["learning_rate_critic"],
+            observation_dim=self.obs_dim,
+            action_dim=self.act_dim,
+            hidden_sizes=self.config["hidden_sizes_critic"],
+            learning_rate=self.config["learning_rate_critic"],
             is_target=False
         ).to(DEVICE)
 
         # Setup target critic networks without optimizer
         self.Q_target = TwinQFunction(
-            observation_dim=self._obs_dim,
-            action_dim=self._action_n,
-            hidden_sizes=self._config["hidden_sizes_critic"],
+            observation_dim=self.obs_dim,
+            action_dim=self.act_dim,
+            hidden_sizes=self.config["hidden_sizes_critic"],
             learning_rate=0,
             is_target=True
         ).to(DEVICE)
 
         # Setup actor network
-        high = torch.from_numpy(self._action_space.high).to(DEVICE)
-        low = torch.from_numpy(self._action_space.low).to(DEVICE)
+        high = torch.from_numpy(self.action_space.high).to(DEVICE)
+        low = torch.from_numpy(self.action_space.low).to(DEVICE)
         output_activation = lambda x: (torch.tanh(x) * (high - low) / 2) + (high + low) / 2
 
         self.policy = Feedforward(
-            input_size=self._obs_dim,
-            hidden_sizes=self._config["hidden_sizes_actor"],
-            output_size=self._action_n,
-            activation_fun=torch.nn.ReLU(),
+            input_size=self.obs_dim,
+            hidden_sizes=self.config["hidden_sizes_actor"],
+            output_size=self.act_dim,
+            activation_fun=nn.ReLU(),
             output_activation=output_activation
         ).to(DEVICE)
 
         # Setup target actor network without optimizer
         self.policy_target = Feedforward(
-            input_size=self._obs_dim,
-            hidden_sizes=self._config["hidden_sizes_actor"],
-            output_size=self._action_n,
-            activation_fun=torch.nn.ReLU(),
+            input_size=self.obs_dim,
+            hidden_sizes=self.config["hidden_sizes_actor"],
+            output_size=self.act_dim,
+            activation_fun=nn.ReLU(),
             output_activation=output_activation
         ).to(DEVICE)
 
@@ -289,15 +288,11 @@ class TD3Agent:
         self._copy_nets()
 
         # Initialize separate optimizer for actor only
-        self.actor_optimizer = torch.optim.Adam(
+        self.policy_optimizer = torch.optim.Adam(
             self.policy.parameters(),
-            lr=self._config["learning_rate_actor"],
+            lr=self.config["learning_rate_actor"],
             eps=1e-6
         )
-
-    def _setup_training(self):
-        """Initializes training-related components."""
-        self.train_iter = 0
 
     def act(self, observation, eps=None):
         """
@@ -322,8 +317,8 @@ class TD3Agent:
             noise = self.noise()
             action = np.clip(
                 action + noise,
-                self._action_space.low,
-                self._action_space.high
+                self.action_space.low,
+                self.action_space.high
             )
         
         return action
@@ -341,84 +336,87 @@ class TD3Agent:
         with torch.no_grad():
             for target_param, param in zip(target.parameters(), source.parameters()):
                 target_param.data.copy_(
-                    self._config["polyak"] * target_param.data +
-                    (1.0 - self._config["polyak"]) * param.data
+                    self.config["polyak"] * target_param.data +
+                    (1.0 - self.config["polyak"]) * param.data
                 )
 
-    def train(self, iter_fit=32):
+    def train(self, num_updates=32):
         """
         Performs training iterations using sampled transitions.
 
         Args:
-            iter_fit (int): Number of training iterations
+            num_updates (int): Number of training iterations
 
         Returns:
             list: Training losses
         """
-        to_torch = lambda x: torch.from_numpy(x).float().to(DEVICE)
         losses = []
+        self.train_iter += 1
 
-        for i in range(iter_fit):
+        for i in range(num_updates):
             # Sample and prepare batch
-            states, actions, rewards, next_states, dones = self.buffer.sample(batch=self._config['batch_size'])
-            s = to_torch(states)
-            a = to_torch(actions)
-            r = to_torch(rewards).view(-1, 1)
-            s_next = to_torch(next_states)
-            done = to_torch(dones).view(-1, 1)
+            data = self.buffer.sample(batch=self.config['batch_size'])
+            if data is None:
+                break
+
+            states = torch.tensor(np.vstack(data[:, 0]), dtype=torch.float32, device=DEVICE)
+            actions = torch.tensor(np.vstack(data[:, 1]), dtype=torch.float32, device=DEVICE)
+            rewards = torch.tensor(np.vstack(data[:, 2]), dtype=torch.float32, device=DEVICE)
+            next_states = torch.tensor(np.vstack(data[:, 3]), dtype=torch.float32, device=DEVICE)
+            dones = torch.tensor(np.vstack(data[:, 4]), dtype=torch.float32, device=DEVICE)
 
             # Normalize rewards
-            r_mean = r.mean()
-            r_std = r.std() + 1e-8
-            r_normalized = (r - r_mean) / r_std
+            r_mean = rewards.mean()
+            r_std = rewards.std() + 1e-8
+            r_normalized = (rewards - r_mean) / r_std
 
             # Compute target Q-values
             with torch.no_grad():
                 # Add clipped noise to target actions (policy smoothing)
-                noise = torch.randn_like(a) * self._config["policy_noise"]
+                noise = torch.randn_like(actions) * self.config["policy_noise"]
                 noise = torch.clamp(
                     noise,
-                    -self._config["noise_clip"],
-                    self._config["noise_clip"]
+                    -self.config["noise_clip"],
+                    self.config["noise_clip"]
                 )
                 
-                next_action = self.policy_target(s_next) + noise
+                next_action = self.policy_target(next_states) + noise
                 next_action = torch.clamp(
                     next_action,
-                    self._action_low,
-                    self._action_high
+                    self.action_low,
+                    self.action_high
                 )
 
                 # Use minimum of twin Q-values
-                q1_next = self.Q_target.Q_value(s_next, next_action)
-                q2_next = self.Q_target.Q2_value(s_next, next_action)
+                q1_next = self.Q_target.Q_value(next_states, next_action)
+                q2_next = self.Q_target.Q2_value(next_states, next_action)
                 q_next = torch.min(q1_next, q2_next)
                 
                 # Compute targets
-                q_target = r_normalized + self._config["discount"] * (1 - done) * q_next
+                q_target = r_normalized + self.config["discount"] * (1 - dones) * q_next
 
             # Update critic
             q_target = q_target.view(-1, 1)
-            q_loss = self.Q.fit(s, a, q_target)
+            q_loss = self.Q.fit(states, actions, q_target)
             losses.append(q_loss)
 
             # Delayed policy updates
-            if i % self._config["policy_delay"] == 0:
+            if i % self.config["policy_delay"] == 0:
                 # Update actor using actor_optimizer
                 self.policy.train()
-                a_pred = self.policy(s)
+                a_pred = self.policy(states)
                 # Q_value returns shape
-                actor_loss = -self.Q.Q_value(s, a_pred).mean()
+                actor_loss = -self.Q.Q_value(states, a_pred).mean()
 
-                self.actor_optimizer.zero_grad()
+                self.policy_optimizer.zero_grad()
                 actor_loss.backward()
                 # Implement gradient clipping for actor
                 torch.nn.utils.clip_grad_norm_(self.policy.parameters(), max_norm=1.0)
-                self.actor_optimizer.step()
+                self.policy_optimizer.step()
                 losses.append(actor_loss.item())
 
                 # Update target networks
-                if self._config["use_target_net"]:
+                if self.config["use_target_net"]:
                     self._soft_update(self.Q_target, self.Q)
                     self._soft_update(self.policy_target, self.policy)
 
@@ -436,12 +434,15 @@ class TD3Agent:
 
     def state(self):
         """Returns current agent state for saving."""
-        return (self.Q.state_dict(), self.policy.state_dict())
+        return {
+            "Q_state": self.Q.state_dict(),
+            "policy_state": self.policy.state_dict()
+        }
 
     def restore_state(self, state):
         """Restores agent state from saved state."""
-        self.Q.load_state_dict(state[0])
-        self.policy.load_state_dict(state[1])
+        self.Q.load_state_dict(state["Q_state"])
+        self.policy.load_state_dict(state["policy_state"])
         self._copy_nets()
 
     def reset_noise(self):
@@ -548,7 +549,7 @@ def main():
         # Periodic saving
         if i_episode % 500 == 0:
             print("########## Saving checkpoint... ##########")
-            ckpt_path = Path("results") / f"TD3_{env_name}_{i_episode}-eps{opts.eps}-t{train_iter}-l{opts.lr}-s{opts.seed}.pth"
+            ckpt_path = Path("results") / f"TD3_{env_name}_{i_episode}-eps{opts.eps}-t{train_iter}-l{opts.lr_actor}-s{opts.seed}.pth"
             ckpt_path.parent.mkdir(exist_ok=True)
             torch.save(agent.state(), ckpt_path)
             save_statistics(i_episode)
