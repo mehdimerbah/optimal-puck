@@ -1,10 +1,10 @@
 environment:
-  name: "LunarLander-v3"
-  max_episode_steps: 500
+  name: "CarRacing-v3"
+  max_episode_steps: 1600
   
 training:
   max_episodes: 1000        
-  max_timesteps: 500       
+  max_timesteps: 1600       
   seed: 42                 
   log_interval: 20          
   save_interval: 500        
@@ -27,7 +27,7 @@ model:
     use_target_net: true
 
   wandb_sweep_config:
-    name: "LunarLander-v2_DDPG"
+    name: "BipedalWalker-v3_DDPG"
     method: "grid"
     metric:
       name: "average_reward"

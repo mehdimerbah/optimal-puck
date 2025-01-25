@@ -1,0 +1,5 @@
+max_steps_per_episode: 2000
+metrics:
+- episode_reward
+- episode_length
+n_episodes: 10

@@ -162,4 +162,9 @@ cython_debug/
 #.idea/
 
 # Ignore experiments folder
+rl_experiments/experiments/
 experiments/
+wandb/
+
+# Ignore singularity container
+optimal-puck.sif
