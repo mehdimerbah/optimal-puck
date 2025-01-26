@@ -30,7 +30,6 @@ class ExperimentGenerator:
 
 
     def _generate_experiment_id(self) -> str:
-<<<<<<< HEAD:rl_experiments/scripts/generate_experiment.py
         """
         Generate unique experiment ID based on environment name, agent type, and timestamp.
         By default, we’ll assume a single agent type is DQN (change as needed).
@@ -40,12 +39,6 @@ class ExperimentGenerator:
         agent_type = self.master_config.get('model', {}).get('name')
 
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-=======
-        """Generate unique experiment ID based on environment, agent type, and timestamp."""
-        env_name = self.master_config['environment']['name'].lower()
-        agent_type = self.master_config.get('models', {}).keys().__iter__().__next__().upper()
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M")
->>>>>>> TD3:scripts/generate_experiment.py
         return f"{env_name}_{agent_type}_{timestamp}"
 
     def _create_experiment_structure(self, experiment_path: Path):
@@ -75,7 +68,6 @@ class ExperimentGenerator:
             (experiment_path / sdir).mkdir(parents=True, exist_ok=True)
 
     def _generate_training_config(self) -> dict:
-<<<<<<< HEAD:rl_experiments/scripts/generate_experiment.py
         """
         Generate training configuration for *all* models specified in the master config.
         Each model in self.master_config['models'] will have its 'training' dict included.
@@ -85,14 +77,6 @@ class ExperimentGenerator:
             'environment': self.master_config['environment'],
             'training': self.master_config['training'],
             'model': self.master_config['model'],
-=======
-        """Generate training configuration."""
-        model_type = list(self.master_config['models'].keys())[0]  # Get first model type
-        return {
-            'environment': self.master_config['environment'],
-            'model': self.master_config['models'][model_type],
-            'training': self.master_config['training']
->>>>>>> TD3:scripts/generate_experiment.py
         }
 
 
