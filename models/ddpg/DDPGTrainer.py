@@ -22,13 +22,16 @@ class DDPGTrainer:
         self.env_name = env_name
         if self.env_name == "HockeyEnv":
             self.env = HockeyEnv_BasicOpponent( mode=Mode.NORMAL,   # or Mode.TRAIN_SHOOTING, Mode.TRAIN_DEFENSE,
-                                               weak_opponent=True)
+                                               weak_opponent=False)
         elif self.env_name == "BipedalWalker-v3":
             self.env = gym.make(env_name, hardcore=False, render_mode="rgb_array")
         else:
             self.env = gym.make(env_name)
 
         self.training_config = training_config
+        self.current_epsilon = training_config["epsilon_start"]
+        self.epsilon_min = training_config["epsilon_min"]
+        self.epsilon_decay = training_config["epsilon_decay"]
         self.model_config = model_config
         self.experiment_path = Path(experiment_path)
         self.agent = self._initialize_agent()
@@ -241,16 +244,27 @@ class DDPGTrainer:
 
             for i_episode in range(1, max_episodes + 1):
                 obs, _info = self.env.reset()
-                self.agent.reset()
+                # self.agent.reset()
                 episode_reward = 0
+
+                touched = 0
+                first_time_touch = 1
 
                 for t in range(max_timesteps):
                     self.timestep += 1
-                    action = self.agent.act(obs)
+                    action = self.agent.act(obs,  epsilon=self.current_epsilon)
                     next_obs, reward, done, trunc, _info = self.env.step(action)
-                    self.agent.store_transition((obs, action, reward, next_obs, done))
+                    touched = max(touched, _info['reward_touch_puck'])
+                    current_reward = reward + 5 * _info['reward_closeness_to_puck'] - (
+                        1 - touched) * 0.1 + touched * first_time_touch * 0.1 * t
+
+
+                    first_time_touch = 1 - touched
+
+                    self.agent.store_transition((obs, action, current_reward, next_obs, done))
                     obs = next_obs
-                    episode_reward += reward
+                   
+                    episode_reward += current_reward
 
                     if render:
                         self.env.render()
@@ -268,10 +282,12 @@ class DDPGTrainer:
                 # Log to wandb
                 if self.wandb_run is not None:
                     self.wandb_run.log({
-                        "reward": episode_reward,
-                        "length": t
-                        # "q_loss": batch_losses[0],
-                        # "actor_loss": batch_losses[1]
+                        "Reward": episode_reward,
+                        "EpisodeLength": t,
+                        "TouchRate": touched,
+                        "CurrentEpsilonValue": self.current_epsilon
+                        #"q_loss": batch_losses[0],
+                        #"actor_loss": batch_losses[1]
                     })
 
                 # Save checkpoint & stats periodically
@@ -286,6 +302,8 @@ class DDPGTrainer:
                     self.logger.info(
                         f"Episode {i_episode}\tAvg Length: {avg_length:.2f}\tAvg Reward: {avg_reward:.3f}"
                     )
+
+                self.current_epsilon = max(self.epsilon_min, self.current_epsilon * self.epsilon_decay)
 
             # Final stats saved and plotted
             self._save_statistics()

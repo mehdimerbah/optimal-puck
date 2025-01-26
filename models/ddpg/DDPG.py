@@ -95,13 +95,14 @@ class DDPGAgent:
         self.act_dim = action_space.shape[0]
         self.config = {
             "eps": 0.1,                  # Noise scale
-            "discount": 0.95,            # Discount factor
-            "buffer_size": int(1e6),     # Replay buffer size
-            "batch_size": 128,           # Minibatch size
+            "discount": 0.99, 
+            "epsilon": 0.05,     
+            "buffer_size": int(1e6),   
+            "batch_size": 128,           
             "learning_rate_actor": 1e-4, 
             "learning_rate_critic": 1e-3,
-            "hidden_sizes_actor": [128, 128],
-            "hidden_sizes_critic": [128, 128, 64],
+            "hidden_sizes_actor": [256, 256],
+            "hidden_sizes_critic": [256, 256],
             "update_target_every": 100,
             "use_target_net": True
         }
@@ -110,9 +111,10 @@ class DDPGAgent:
         # Initialize replay buffer
         self.buffer = Memory(max_size=self.config["buffer_size"])
 
-        # Noise process
-        self.action_noise = OUNoise((self.act_dim))
-        self.eps = self.config["eps"]
+        # Noise process - ABLATION OF NOISE : Testing the effect of removing the noise on the exploration process
+        # self.action_noise = OUNoise((self.act_dim))
+        # self.eps = self.config["eps"]
+        self.epsilon = self.config["epsilon"]
 
         # Q (critic) and target Q
         self.Q = QFunction(
@@ -120,35 +122,39 @@ class DDPGAgent:
             action_dim=self.act_dim,
             hidden_sizes=self.config["hidden_sizes_critic"],
             learning_rate=float(self.config["learning_rate_critic"])
-        )
+        ).to(device)
         self.Q_target = QFunction(
             observation_dim=self.obs_dim,
             action_dim=self.act_dim,
             hidden_sizes=self.config["hidden_sizes_critic"],
             learning_rate=0.0  # target net doesn't need an optimizer
-        )
+        ).to(device)
 
-        # Policy (actor) and target policy
-        high = torch.tensor(action_space.high, dtype=torch.float32)
-        low  = torch.tensor(action_space.low, dtype=torch.float32)
+        
+        # Define action space bounds
+        high = torch.tensor(action_space.high, dtype=torch.float32, device=device)
+        low  = torch.tensor(action_space.low, dtype=torch.float32, device=device)
+        self.high = high.cpu().numpy()
+        self.low = low.cpu().numpy()
 
         # Output activation: scale tanh outputs to [low, high]
         output_activation = lambda x: (torch.tanh(x) * (high - low) / 2.0) + (high + low) / 2.0
 
+        # Policy (actor) and target policy
         self.policy = Feedforward(
             input_size=self.obs_dim,
             hidden_sizes=self.config["hidden_sizes_actor"],
             output_size=self.act_dim,
             activation_fun=nn.ReLU(),
             output_activation=output_activation
-        )
+        ).to(device)
         self.policy_target = Feedforward(
             input_size=self.obs_dim,
             hidden_sizes=self.config["hidden_sizes_actor"],
             output_size=self.act_dim,
             activation_fun=nn.ReLU(),
             output_activation=output_activation
-        )
+        ).to(device)
 
         # Copy initial weights to target networks
         self._copy_nets()
@@ -167,24 +173,33 @@ class DDPGAgent:
         self.Q_target.load_state_dict(self.Q.state_dict())
         self.policy_target.load_state_dict(self.policy.state_dict())
 
-    def reset(self):
-        """Reset noise process at the beginning of each episode."""
-        self.action_noise.reset()
+    # def reset(self):
+    #     """Reset noise process at the beginning of each episode."""
+    #     self.action_noise.reset()
 
-    def act(self, observation, eps=None):
+    def act(self, observation, epsilon=None, evaluate=False):   
         """
         Return action for the given observation, adding OU noise scaled by eps.
         """
         self.policy.eval()
-        obs_tensor = torch.tensor(observation, dtype=torch.float32, device=device).unsqueeze(0)
-        with torch.no_grad():
-            action = self.policy(obs_tensor).cpu().numpy()[0]
 
-        noise_scale = eps if eps is not None else self.eps
-        action += self.action_noise() * noise_scale
+        # Ensure `obs_tensor` is on the correct device
+        obs_tensor = torch.tensor(observation, dtype=torch.float32).to(device).unsqueeze(0)
         
-        # Clip actions to action space
-        return np.clip(action, -1.0, 1.0)  # NOTE: If the environment's bounds are not [-1,1], adapt accordingly.
+        with torch.no_grad():
+            policy_action = self.policy(obs_tensor)  # still on GPU
+        policy_action = policy_action.cpu().numpy()[0] # Now switching to CPU
+        
+        # Decide if we explore or exploit
+        if np.random.rand() < (epsilon if epsilon is not None else self.epsilon) and not evaluate:
+            # Random action in continuous space
+            random_action = np.random.uniform(low=self.low, high=self.high)
+            action = random_action
+        else:
+            # Use the deterministic action from policy
+            action = policy_action
+
+        return action
 
     def store_transition(self, transition):
         """Add a transition (s, a, r, s_next, done) to the replay buffer."""

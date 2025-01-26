@@ -23,7 +23,7 @@ model:
     learning_rate_critic: 1e-3
     hidden_sizes_actor: [128, 128]
     hidden_sizes_critic: [128, 128, 64]
-    update_target_every: 100
+    update_target_every: 1000
     use_target_net: true
 
   wandb_sweep_config:
@@ -34,7 +34,7 @@ model:
       goal: "maximize"
     parameters:
       batch_size:
-        values: [32, 64, 128]
+        values: [64, 128, 256]
       buffer_size:
         values: [1000000]
       learning_rate_actor:
@@ -42,9 +42,9 @@ model:
       learning_rate_critic:
         values: [1e-3, 5e-4, 1e-4]
       discount:
-        values: [0.9, 0.95, 0.99]
+        values: [0.95, 0.99]
       eps:
-        values: [0.05, 0.1, 0.2]
+        values: [0.1, 0.2, 0.3]
 
 evaluation:
   n_episodes: 10
