@@ -17,219 +17,211 @@ from pathlib import Path
 # If installed: import hockey
 import hockey.hockey_env as h_env
 from hockey.hockey_env import BasicOpponent
-from hockey.hockey_env import Mode
+
+from hockey.hockey_env import HockeyEnv_BasicOpponent, Mode
+
 
 
 # Import your Dreamer agent
 from models.dreamer.DREAM import DreamerV3Agent
 
+
 class DreamerV3Trainer:
-    def __init__(self, env_config, training_config, model_config, experiment_path, wandb_run=None):
+    """
+    A class for environment interaction, logging, checkpointing,
+    saving statistics, and orchestrating the training loop for Dreamer.
+    """
+
+    def __init__(self, env_name, training_config, model_config, experiment_path, wandb_run=None):
         """
-        env_config: dict with keys { 'name': "HockeyEnv", 'mode': "NORMAL", 'opponent_type': ... }
-        training_config: dict with standard training hyperparams
-        model_config: dict for the DreamerV3Agent
-        experiment_path: path string where logs & checkpoints will be saved
-        wandb_run: optional wandb run
+        env_name        : Name of the environment (e.g. "HockeyEnv" or "BipedalWalker-v3").
+        training_config : Dictionary with training parameters (max_episodes, max_timesteps, etc.).
+        model_config    : Dictionary for DreamerV3Agent hyperparameters.
+        experiment_path : Path where logs & checkpoints will be saved.
+        wandb_run       : optional wandb run for logging (if None, no wandb logging).
         """
-        self.env_config = env_config
+
+        self.env_name = env_name
+
+        # 1) Create environment
+        if self.env_name == "HockeyEnv":
+            # based config
+            self.env = h_env.HockeyEnv_BasicOpponent(mode=Mode.NORMAL, weak_opponent=False)
+        else:
+            self.env = gym.make(self.env_name)
+
+        # 2) Save configs
         self.training_config = training_config
         self.model_config = model_config
         self.experiment_path = Path(experiment_path)
         self.wandb_run = wandb_run
 
-        # ============ Environment setup ============
-        self.logger = self._init_logger()
-        self.mode_str = self.env_config.get("mode", "NORMAL")  # e.g. "NORMAL"
-        self.opponent_type = self.env_config.get("opponent_type", "none")  # e.g. "basic_weak"
-        self.env = self._create_env()
-
-        # Initialize agent for the left player
+        # 3) Initialize Dreamer agent
         self.agent = DreamerV3Agent(
             observation_space=self.env.observation_space,
             action_space=self.env.action_space,
             **self.model_config
         )
 
-        # If you want self-play, create a second agent or reuse the same agent
-        self.self_play = (self.opponent_type == "self_play")
-        if self.self_play:
-            # Option 1: same agent controlling both sides
-            self.agent2 = self.agent
-            # Option 2: different agent for the right side
-            # self.agent2 = DreamerV3Agent(
-            #    observation_space=self.env.observation_space,
-            #    action_space=self.env.action_space,
-            #    **self.model_config
-            # )
-        else:
-            self.agent2 = None
-
-        # If we use a basic opponent
-        self.basic_opponent = None
-        if "basic" in self.opponent_type:
-            weak = True if "weak" in self.opponent_type else False
-            self.basic_opponent = BasicOpponent(weak=weak)
-
-        # Stats
+        # 4) Stats trackers
         self.rewards = []
         self.lengths = []
         self.losses = []  # (wm_loss, actor_loss, critic_loss) tuples
         self.timestep = 0
 
-        # Prepare directories
+        # 5) Prepare directories
         self.results_path = self.experiment_path / "results"
-        self.training_stats_path = self.results_path / "metrics"
-        self.training_logs_path = self.experiment_path / "logs"
-        self.training_plots_path = self.results_path / "plots"
+        self.training_stats_path = self.results_path / "training" / "stats"
+        self.training_logs_path = self.results_path / "training" / "logs"
+        self.training_plots_path = self.results_path / "training" / "plots"
         self.training_stats_path.mkdir(parents=True, exist_ok=True)
         self.training_logs_path.mkdir(parents=True, exist_ok=True)
         self.training_plots_path.mkdir(parents=True, exist_ok=True)
 
-        # Seed
-        seed = training_config.get("seed", 42)
-        np.random.seed(seed)
-        torch.manual_seed(seed)
-        self.env.reset(seed=seed)
+        # 6) Setup logger
+        self.logger = self._initialize_logger()
 
-    def _init_logger(self):
-        logger = logging.getLogger("DreamerV3TrainerLogger")
+        # 7) Set random seeds if specified
+        self._initialize_seed()
+
+    def _initialize_logger(self):
+        """
+        Configure a logger that logs to both stdout and a file in training/logs/dreamer.log
+        """
+        log_file = self.training_logs_path / "dreamer_training.log"
+        logger = logging.getLogger("Dreamer_Trainer")
         logger.setLevel(logging.INFO)
 
-        # prevent multiple handlers
         if not logger.handlers:
-            handler = logging.StreamHandler(sys.stdout)
-            handler.setLevel(logging.INFO)
-            logger.addHandler(handler)
+            file_handler = logging.FileHandler(log_file)
+            file_handler.setLevel(logging.INFO)
+
+            console_handler = logging.StreamHandler(sys.stdout)
+            console_handler.setLevel(logging.INFO)
+
+            formatter = logging.Formatter(
+                fmt="%(asctime)s [%(levelname)s] %(message)s",
+                datefmt="%Y-%m-%d %H:%M:%S"
+            )
+            file_handler.setFormatter(formatter)
+            console_handler.setFormatter(formatter)
+
+            logger.addHandler(file_handler)
+            logger.addHandler(console_handler)
+
+        logger.info(f"Logger initialized. Writing logs to {log_file}")
         return logger
 
-    def _create_env(self):
+    def _initialize_seed(self):
         """
-        Creates a HockeyEnv with the specified mode.
-        e.g., mode = "NORMAL", "TRAIN_SHOOTING", or "TRAIN_DEFENSE".
-        The environment already has the correct obs_space / action_space.
+        Optionally set random seeds for reproducibility.
         """
-        mode_map = {
-            "NORMAL": Mode.NORMAL,
-            "TRAIN_SHOOTING": Mode.TRAIN_SHOOTING,
-            "TRAIN_DEFENSE": Mode.TRAIN_DEFENSE
-        }
+        seed = self.training_config.get("seed", 42)
+        torch.manual_seed(seed)
+        np.random.seed(seed)
+        try:
+            self.env.reset(seed=seed)
+        except TypeError:
+            # Some older gym versions or custom envs might not support `seed` in reset().
+            pass
+        self.logger.info(f"Initialized random seeds to {seed}.")
 
-        # Wähle den Modus basierend auf mode_str aus, standardmäßig Mode.NORMAL
-        selected_mode = mode_map.get(self.mode_str, Mode.NORMAL)
-
-        # Erstelle das Environment mit dem ausgewählten Modus
-        env = h_env.HockeyEnv(mode=selected_mode)
-        return env
-
-    def train(self):
+    def _save_checkpoint(self, episode):
         """
-        Main training loop:
-          - If self_play or basic_opponent, we get action2 from them
-          - We store transitions for the left agent
-          - We perform multiple training iterations after each episode
+        Saves a checkpoint of the Dreamer agent's parameters.
         """
-        max_episodes = self.training_config["max_episodes"]
-        max_timesteps = self.training_config["max_timesteps"]
-        log_interval = self.training_config.get("log_interval", 20)
-        save_interval = self.training_config.get("save_interval", 200)
-        render = self.training_config.get("render", False)
-        train_iter = self.training_config.get("train_iter", 32)
+        saved_models_dir = self.results_path / "training" / "saved_models"
+        saved_models_dir.mkdir(parents=True, exist_ok=True)
+        checkpoint_path = saved_models_dir / f"dreamer_checkpoint_ep{episode}.pth"
 
-        self.logger.info(f"Starting DreamerV3 on HockeyEnv (mode={self.mode_str}, opponent={self.opponent_type})")
-        self.logger.info(f"max_episodes={max_episodes}, max_timesteps={max_timesteps}")
-
-        for ep in range(1, max_episodes + 1):
-            obs, info = self.env.reset()
-            self.agent.reset()
-            if self.self_play and self.agent2 != self.agent:
-                self.agent2.reset()
-
-            episode_reward = 0.0
-
-            for t in range(max_timesteps):
-                self.timestep += 1
-
-                # Left player's action (our agent)
-                action1 = self.agent.act(obs)
-
-                # Right player's action
-                if self.self_play:
-                    # Option 1: same agent controlling both sides
-                    obs_agent2 = self.env.obs_agent_two()  # second agent's observation
-                    action2 = self.agent2.act(obs_agent2)
-                elif self.basic_opponent:
-                    obs_agent2 = self.env.obs_agent_two()
-                    action2 = self.basic_opponent.act(obs_agent2)
-                else:
-                    # e.g. random
-                    action2 = np.random.uniform(-1, 1, size=self.env.action_space.shape[0])
-
-                # Step environment
-                joint_action = np.hstack([action1, action2])
-                next_obs, reward, done, trunc, info = self.env.step(joint_action)
-                episode_reward += reward
-
-                # Store transition from the left player's perspective
-                self.agent.store_transition((obs, action1, reward, next_obs, done))
-
-                obs = next_obs
-
-                if render:
-                    self.env.render()
-
-                if done or trunc:
-                    break
-
-            # After each episode, do multiple training updates
-            batch_losses = self.agent.train(num_updates=train_iter)
-            self.losses.extend(batch_losses)
-
-            self.rewards.append(episode_reward)
-            self.lengths.append(t)
-
-            # wandb logging
-            if self.wandb_run:
-                self.wandb_run.log({"episode_reward": episode_reward, "episode_length": t})
-
-            # save & log
-            if ep % save_interval == 0:
-                self._save_checkpoint(ep)
-                self._save_statistics()
-
-            if ep % log_interval == 0:
-                avg_rew = np.mean(self.rewards[-log_interval:])
-                avg_len = np.mean(self.lengths[-log_interval:])
-                self.logger.info(f"Episode {ep}: avg_reward={avg_rew:.2f}, avg_length={avg_len:.1f}")
-
-        # End of training
-        self._save_statistics()
-        self._plot_statistics()
-        final_metrics = self._final_metrics()
-        if self.wandb_run:
-            self.wandb_run.log({"average_reward": final_metrics["average_reward"]})
-            self.wandb_run.summary.update(final_metrics)
-        return final_metrics
+        torch.save(self.agent.state(), checkpoint_path)
+        self.logger.info(f"Saved checkpoint at episode {episode} -> {checkpoint_path}")
 
     def _save_statistics(self):
-        stats_file = self.training_stats_path / "dreamer_stats.pkl"
+        """
+        Save training statistics (rewards, lengths, losses) as a pickle file.
+        """
+        stats_file = self.training_stats_path / "dreamer_training_stats.pkl"
         data = {
             "rewards": self.rewards,
             "lengths": self.lengths,
-            "losses": self.losses
+            "losses": self.losses,
         }
         with open(stats_file, "wb") as f:
             pickle.dump(data, f)
-        self.logger.info(f"Saved training stats to {stats_file}")
+        self.logger.info(f"Saved training statistics to -> {stats_file}")
 
-    def _save_checkpoint(self, ep):
-        save_dir = self.experiment_path / "models" / "dreamer"
-        save_dir.mkdir(parents=True, exist_ok=True)
-        checkpoint_path = save_dir / f"dreamer_checkpoint_ep{ep}.pth"
-        torch.save(self.agent.state(), checkpoint_path)
-        self.logger.info(f"Saved checkpoint at episode {ep} -> {checkpoint_path}")
+    def _plot_statistics(self, window_size=50):
+        """
+        Plot and save the training curves (rewards and losses).
+        """
+        import matplotlib
+        matplotlib.use('Agg')
+        import matplotlib.pyplot as plt
+
+        def running_mean(x, N):
+            cumsum = np.cumsum(np.insert(x, 0, 0))
+            return (cumsum[N:] - cumsum[:-N]) / float(N)
+
+        episodes = len(self.rewards)
+        if episodes < 1:
+            return
+
+        # 1) Rewards
+        smoothed_rewards = running_mean(self.rewards, min(window_size, episodes))
+        smoothed_eps = np.arange(len(smoothed_rewards)) + window_size
+
+        # 2) Losses
+        # losses is a list of tuples: (wm_loss, actor_loss, critic_loss)
+        wm_losses = [l[0] for l in self.losses]
+        actor_losses = [l[1] for l in self.losses]
+        critic_losses = [l[2] for l in self.losses]
+
+        plt.figure(figsize=(14, 10))
+
+        # -- Rewards Plot --
+        plt.subplot(4, 1, 1)
+        plt.plot(range(1, episodes + 1), self.rewards, label="Rewards", alpha=0.4)
+        if len(smoothed_eps) == len(smoothed_rewards):
+            plt.plot(smoothed_eps, smoothed_rewards, label="Smoothed", linewidth=2)
+        plt.xlabel("Episode")
+        plt.ylabel("Reward")
+        plt.title("Episode Rewards")
+        plt.legend()
+        plt.grid(True)
+
+        # -- World Model Loss Plot --
+        plt.subplot(4, 1, 2)
+        plt.plot(wm_losses, label="WorldModel Loss")
+        plt.ylabel("WM Loss")
+        plt.grid(True)
+        plt.legend()
+
+        # -- Actor Loss Plot --
+        plt.subplot(4, 1, 3)
+        plt.plot(actor_losses, label="Actor Loss", color='orange')
+        plt.ylabel("Actor Loss")
+        plt.grid(True)
+        plt.legend()
+
+        # -- Critic Loss Plot --
+        plt.subplot(4, 1, 4)
+        plt.plot(critic_losses, label="Critic Loss", color='green')
+        plt.ylabel("Critic Loss")
+        plt.xlabel("Training Step")
+        plt.grid(True)
+        plt.legend()
+
+        plt.tight_layout()
+
+        plot_file = self.training_plots_path / "dreamer_training_plots.png"
+        plt.savefig(plot_file)
+        self.logger.info(f"Saved training plot to {plot_file}")
 
     def _final_metrics(self):
+        """
+        Return final metrics after training finishes.
+        """
         if len(self.losses) > 0:
             final_wm_loss = self.losses[-1][0]
             final_actor_loss = self.losses[-1][1]
@@ -242,72 +234,101 @@ class DreamerV3Trainer:
         avg_reward = float(np.mean(self.rewards)) if len(self.rewards) > 0 else 0.0
         avg_length = float(np.mean(self.lengths)) if len(self.lengths) > 0 else 0.0
 
-        return {
+        metrics = {
             "average_reward": avg_reward,
             "average_length": avg_length,
             "final_world_model_loss": final_wm_loss,
             "final_actor_loss": final_actor_loss,
             "final_critic_loss": final_critic_loss
         }
+        self.logger.info(f"Final training metrics: {metrics}")
+        return metrics
 
-    def _plot_statistics(self, window_size=50):
-        import matplotlib
-        matplotlib.use('Agg')
-        import matplotlib.pyplot as plt
+    def train(self):
+        """
+        Main training loop:
+          1) Interacts with the environment
+          2) Collects transitions in replay buffer
+          3) Calls agent.train() after each episode
+          4) Periodically logs, saves stats, and checkpoints
+        """
+        max_episodes = self.training_config["max_episodes"]
+        max_timesteps = self.training_config["max_timesteps"]
+        log_interval = self.training_config.get("log_interval", 20)
+        save_interval = self.training_config.get("save_interval", 500)
+        render = self.training_config.get("render", False)
+        train_iter = self.training_config.get("train_iter", 32)
 
-        def running_mean(x, n):
-            cumsum = np.cumsum(np.insert(x, 0, 0))
-            return (cumsum[n:] - cumsum[:-n]) / float(n)
+        self.logger.info(f"Starting DreamerV3 Training on {self.env_name}")
+        self.logger.info(f"max_episodes={max_episodes}, max_timesteps={max_timesteps}, train_iter={train_iter}")
 
-        if len(self.rewards) < 1:
-            return
+        for i_episode in range(1, max_episodes + 1):
+            obs, info = self.env.reset()
+            self.agent.reset()
+            episode_reward = 0.0
 
-        # Rewards
-        episodes = np.arange(1, len(self.rewards) + 1)
-        smoothed_rewards = running_mean(self.rewards, min(window_size, len(self.rewards)))
-        smoothed_eps = np.arange(len(smoothed_rewards)) + window_size
+            # If you have special "touch" logic or environment-specific reward shaping, do it here.
+            # Example:
+            touched = 0
+            first_time_touch = 1
 
-        # Losses
-        wm_losses = [l[0] for l in self.losses]
-        actor_losses = [l[1] for l in self.losses]
-        critic_losses = [l[2] for l in self.losses]
+            for t in range(max_timesteps):
+                self.timestep += 1
+                action = self.agent.act(obs)
 
-        plt.figure(figsize=(12, 10))
+                next_obs, reward, done, trunc, info = self.env.step(action)
 
-        # 1) Rewards
-        plt.subplot(4, 1, 1)
-        plt.plot(episodes, self.rewards, label="Rewards", alpha=0.4)
-        if len(smoothed_eps) == len(smoothed_rewards):
-            plt.plot(smoothed_eps, smoothed_rewards, label="Smoothed", linewidth=2)
-        plt.ylabel("Reward")
-        plt.xlabel("Episode")
-        plt.title("Rewards")
-        plt.grid(True)
-        plt.legend()
+                # Example: Custom reward shaping (like in the DDPG code).
+                # This is optional and depends on your environment design:
+                touched = max(touched, info.get('reward_touch_puck', 0))
+                current_reward = reward + 5 * info.get('reward_closeness_to_puck', 0) - \
+                                 (1 - touched) * 0.1 + touched * first_time_touch * 0.1 * t
+                first_time_touch = 1 - touched
 
-        # 2) World Model Loss
-        plt.subplot(4, 1, 2)
-        plt.plot(wm_losses, label="WorldModel Loss")
-        plt.ylabel("WM Loss")
-        plt.grid(True)
-        plt.legend()
+                # Store transition
+                self.agent.store_transition((obs, action, current_reward, next_obs, done))
 
-        # 3) Actor Loss
-        plt.subplot(4, 1, 3)
-        plt.plot(actor_losses, label="Actor Loss", color='orange')
-        plt.ylabel("Actor Loss")
-        plt.grid(True)
-        plt.legend()
+                obs = next_obs
+                episode_reward += current_reward
 
-        # 4) Critic Loss
-        plt.subplot(4, 1, 4)
-        plt.plot(critic_losses, label="Critic Loss", color='green')
-        plt.ylabel("Critic Loss")
-        plt.xlabel("Training Step")
-        plt.grid(True)
-        plt.legend()
+                if render:
+                    self.env.render()
 
-        plt.tight_layout()
-        out_file = self.training_plots_path / "dreamer_training_plot.png"
-        plt.savefig(out_file)
-        self.logger.info(f"Saved training plot to {out_file}")
+                if done or trunc:
+                    break
+
+            # Training updates after the episode
+            batch_losses = self.agent.train(num_updates=train_iter)
+            self.losses.extend(batch_losses)
+
+            self.rewards.append(episode_reward)
+            self.lengths.append(t)
+
+            # Optionally log to Weights & Biases
+            if self.wandb_run is not None:
+                self.wandb_run.log({
+                    "EpisodeReward": episode_reward,
+                    "EpisodeLength": t,
+                    "TouchRate": touched,
+                })
+
+            # Save & log
+            if i_episode % save_interval == 0:
+                self._save_checkpoint(i_episode)
+                self._save_statistics()
+
+            if i_episode % log_interval == 0:
+                avg_reward = np.mean(self.rewards[-log_interval:])
+                avg_length = np.mean(self.lengths[-log_interval:])
+                self.logger.info(f"Episode {i_episode}:\tAvg Reward={avg_reward:.2f}\tAvg Length={avg_length:.1f}")
+
+        # End of training
+        self._save_statistics()
+        self._plot_statistics()
+
+        final_metrics = self._final_metrics()
+        if self.wandb_run is not None:
+            self.wandb_run.log({"average_reward": final_metrics["average_reward"]})
+            self.wandb_run.summary.update(final_metrics)
+
+        return final_metrics

@@ -18,6 +18,7 @@ class DDPGTrainer:
     saving statistics, and orchestrating the training loop for DDPG.
     """
     def __init__(self, env_name, training_config, model_config, experiment_path, wandb_run=None):
+
         # Initialize the environement
         self.env_name = env_name
         if self.env_name == "HockeyEnv":

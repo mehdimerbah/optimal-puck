@@ -2,6 +2,7 @@ import yaml
 import os
 from pathlib import Path
 from models.ddpg.DDPGTrainer import DDPGTrainer
+from models.dreamer.DREAMTrainer import DreamerV3Trainer
 import argparse
 import wandb
 import logging
@@ -11,7 +12,9 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 logger = logging.getLogger(__name__)
 
 TRAINER_MAP = {
-    "DDPG": DDPGTrainer,
+    #"DDPG": DDPGTrainer,
+    "Dreamer":DreamerV3Trainer
+
 }
 # EXPERIMENT_ID = "Pendulum-v1_DDPG_20250112_200510"
 # EXPERIMENT_PATH = Path("/Users/mehdi/Documents/Tübingen/WiSe24/ReinforcementLearning/Project/optimal-puck/rl_experiments/experiments/Pendulum-v1_DDPG_20250112_200510")
@@ -38,6 +41,14 @@ def get_hyperparameters(config, model_name):
             'discount': config.discount,
             'eps': config.eps,
             'buffer_size': config.buffer_size
+        }
+    if model_name == "Dreamer":
+        hyperparameter_map = {
+            'actor_lr': config.actor_lr,
+            'critic_lr': config.critic_lr,
+            'world_model_lr': config.world_model_lr,
+            'batch_size': config.batch_size,
+            'discount': config.discount,
         }
 
     return hyperparameter_map
@@ -75,7 +86,7 @@ def main():
     except Exception as e:
         logger.error(f"Failed to load sweep configuration: {e}")
         return
-
+    wandb.login(key="df68adaefc0e57997f5522cb5e6c61421ee41475")
     sweep_id = wandb.sweep(sweep=wandb_config, project="optimal-tuning")
     wandb.agent(sweep_id, function=train_agent)
 

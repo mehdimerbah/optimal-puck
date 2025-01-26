@@ -1,6 +1,7 @@
 import yaml
 from pathlib import Path
 from models.ddpg.DDPGTrainer import DDPGTrainer
+from models.dreamer.DREAMTrainer import DreamerV3Trainer
 import argparse
 
 
@@ -26,9 +27,10 @@ def main():
     
 
     trainer_map = {
-        "DDPG": DDPGTrainer,
+        #"DDPG": DDPGTrainer,
         # "PPO": PPOTrainer,
         # "DQN": DQNTrainer,
+        "Dreamer":DreamerV3Trainer
     }
 
     trainer = trainer_map[training_config['model']['name']](
