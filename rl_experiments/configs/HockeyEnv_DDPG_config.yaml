@@ -3,9 +3,6 @@ environment:
   max_episode_steps: 250
   
 training:
-  epsilon_start: 1.0     
-  epsilon_min: 0.05
-  epsilon_decay: 0.999
   max_episodes: 10000        
   max_timesteps: 250        
   seed: 42                  
@@ -30,11 +27,11 @@ model:
       learning_rate_actor:
         values: [1e-4]
       learning_rate_critic:
-        values: [1e-3, 1e-4]
+        values: [1e-4]
       discount:
         values: [0.95, 0.99]
-      eps:
-        values: [0.0]
+      noise_scale:
+        values: [0.1, 0.2, 0.3]
 
 evaluation:
   n_episodes: 10

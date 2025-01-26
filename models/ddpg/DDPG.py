@@ -94,13 +94,13 @@ class DDPGAgent:
         self.obs_dim = observation_space.shape[0]
         self.act_dim = action_space.shape[0]
         self.config = {
-            "eps": 0.1,                  # Noise scale
+            "noise_scale": 0.1,                  
             "discount": 0.99, 
             "epsilon": 0.05,     
             "buffer_size": int(1e6),   
             "batch_size": 128,           
             "learning_rate_actor": 1e-4, 
-            "learning_rate_critic": 1e-3,
+            "learning_rate_critic": 1e-4,
             "hidden_sizes_actor": [256, 256],
             "hidden_sizes_critic": [256, 256],
             "update_target_every": 100,
@@ -112,9 +112,9 @@ class DDPGAgent:
         self.buffer = Memory(max_size=self.config["buffer_size"])
 
         # Noise process - ABLATION OF NOISE : Testing the effect of removing the noise on the exploration process
-        # self.action_noise = OUNoise((self.act_dim))
-        # self.eps = self.config["eps"]
-        self.epsilon = self.config["epsilon"]
+        self.action_noise = OUNoise((self.act_dim))
+        self.noise_scale = self.config.get("noise_scale", 0.2)
+        #self.epsilon = self.config["epsilon"]
 
         # Q (critic) and target Q
         self.Q = QFunction(
@@ -173,33 +173,62 @@ class DDPGAgent:
         self.Q_target.load_state_dict(self.Q.state_dict())
         self.policy_target.load_state_dict(self.policy.state_dict())
 
-    # def reset(self):
-    #     """Reset noise process at the beginning of each episode."""
-    #     self.action_noise.reset()
+    def reset(self):
+        """Reset noise process at the beginning of each episode."""
+        self.action_noise.reset()
 
-    def act(self, observation, epsilon=None, evaluate=False):   
+
+    def act(self, observation, evaluate=False):
         """
-        Return action for the given observation, adding OU noise scaled by eps.
+        Return action for the given observation, adding OU noise
+        if we are not in evaluate mode.
         """
         self.policy.eval()
 
-        # Ensure `obs_tensor` is on the correct device
+        # Convert observation -> torch tensor
         obs_tensor = torch.tensor(observation, dtype=torch.float32).to(device).unsqueeze(0)
-        
-        with torch.no_grad():
-            policy_action = self.policy(obs_tensor)  # still on GPU
-        policy_action = policy_action.cpu().numpy()[0] # Now switching to CPU
-        
-        # Decide if we explore or exploit
-        if np.random.rand() < (epsilon if epsilon is not None else self.epsilon) and not evaluate:
-            # Random action in continuous space
-            random_action = np.random.uniform(low=self.low, high=self.high)
-            action = random_action
-        else:
-            # Use the deterministic action from policy
-            action = policy_action
 
-        return action
+        with torch.no_grad():
+            policy_action = self.policy(obs_tensor)
+
+        # Convert back to numpy array
+        policy_action = policy_action.cpu().numpy()[0]
+
+        if evaluate:
+            # No noise in evaluation
+            return policy_action
+        else:
+            # Add OU noise
+            noise = self.action_noise()
+            noisy_action = policy_action + self.noise_scale * noise
+
+            # clip the action to env bounds
+            clipped_action = np.clip(noisy_action, self.low, self.high)
+            return clipped_action
+
+    # def act(self, observation, epsilon=None, evaluate=False):
+    #     """
+    #     Return action for the given observation, choose an action with eps-greedy strategy.
+    #     """
+    #     self.policy.eval()
+
+    #     # Ensure `obs_tensor` is on the correct device
+    #     obs_tensor = torch.tensor(observation, dtype=torch.float32).to(device).unsqueeze(0)
+        
+    #     with torch.no_grad():
+    #         policy_action = self.policy(obs_tensor)  # still on GPU
+    #     policy_action = policy_action.cpu().numpy()[0] # Now switching to CPU
+        
+    #     # Decide if we explore or exploit
+    #     if np.random.rand() < (epsilon if epsilon is not None else self.epsilon) and not evaluate:
+    #         # Random action in continuous space
+    #         random_action = np.random.uniform(low=self.low, high=self.high)
+    #         action = random_action
+    #     else:
+    #         # Use the deterministic action from policy
+    #         action = policy_action
+
+    #     return action
 
     def store_transition(self, transition):
         """Add a transition (s, a, r, s_next, done) to the replay buffer."""
@@ -208,7 +237,6 @@ class DDPGAgent:
     def train(self, num_updates=32):
         """
         Perform gradient updates on the Q-network (critic) and Policy (actor).
-        This is typically called once per episode (or at some frequency).
         """
         losses = []
         self.train_iter += 1

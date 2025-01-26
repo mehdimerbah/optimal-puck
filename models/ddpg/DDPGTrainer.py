@@ -22,16 +22,16 @@ class DDPGTrainer:
         self.env_name = env_name
         if self.env_name == "HockeyEnv":
             self.env = HockeyEnv_BasicOpponent( mode=Mode.NORMAL,   # or Mode.TRAIN_SHOOTING, Mode.TRAIN_DEFENSE,
-                                               weak_opponent=False)
+                                               weak_opponent=True)
         elif self.env_name == "BipedalWalker-v3":
             self.env = gym.make(env_name, hardcore=False, render_mode="rgb_array")
         else:
             self.env = gym.make(env_name)
 
         self.training_config = training_config
-        self.current_epsilon = training_config["epsilon_start"]
-        self.epsilon_min = training_config["epsilon_min"]
-        self.epsilon_decay = training_config["epsilon_decay"]
+        # self.current_epsilon = training_config["epsilon_start"]
+        # self.epsilon_min = training_config["epsilon_min"]
+        # self.epsilon_decay = training_config["epsilon_decay"]
         self.model_config = model_config
         self.experiment_path = Path(experiment_path)
         self.agent = self._initialize_agent()
@@ -83,7 +83,7 @@ class DDPGTrainer:
         Configure a logger that logs to both stdout and a file 
         in experiments/experiment_id/training/logs/training.log
         """
-        log_file = self.training_logs_path / f"DDPG_{self.env_name}_eps{self.model_config['eps']}_alr{float(self.model_config['learning_rate_actor'])}_clr{float(self.model_config['learning_rate_critic'])}_gamma{self.model_config['discount']}.log"
+        log_file = self.training_logs_path / f"DDPG_{self.env_name}_noise{self.model_config['noise_scale']}_alr{float(self.model_config['learning_rate_actor'])}_clr{float(self.model_config['learning_rate_critic'])}_gamma{self.model_config['discount']}.log"
 
         # Create a logger
         logger = logging.getLogger("DDPG_Trainer")
@@ -119,7 +119,7 @@ class DDPGTrainer:
         Saves a pickle file containing training statistics 
         in experiments/experiment_id/training/stats/
         """
-        stats_file = self.training_stats_path / f"DDPG_{self.env_name}_eps{self.model_config['eps']}_alr{float(self.model_config['learning_rate_actor'])}_clr{float(self.model_config['learning_rate_critic'])}_gamma{self.model_config['discount']}_stats.pkl"
+        stats_file = self.training_stats_path / f"DDPG_{self.env_name}_noise{self.model_config['noise_scale']}_alr{float(self.model_config['learning_rate_actor'])}_clr{float(self.model_config['learning_rate_critic'])}_gamma{self.model_config['discount']}_stats.pkl"
         data = {
             "rewards": self.rewards,
             "lengths": self.lengths,
@@ -134,11 +134,11 @@ class DDPGTrainer:
         """
         Saves a checkpoint of the agent’s parameters in
         experiments/experiment_id/training/saved_models/
-        (or whichever directory structure you prefer).
+
         """
         saved_models_dir = self.results_path / "training" / "saved_models"
         saved_models_dir.mkdir(parents=True, exist_ok=True)
-        checkpoint_path = saved_models_dir / f"DDPG_{self.env_name}_eps{self.model_config['eps']}_alr{float(self.model_config['learning_rate_actor'])}_clr{float(self.model_config['learning_rate_critic'])}_gamma{self.model_config['discount']}_checkpoint_ep{episode}.pth"
+        checkpoint_path = saved_models_dir / f"DDPG_{self.env_name}_noise{self.model_config['noise_scale']}_alr{float(self.model_config['learning_rate_actor'])}_clr{float(self.model_config['learning_rate_critic'])}_gamma{self.model_config['discount']}_checkpoint_ep{episode}.pth"
 
         torch.save(self.agent.state(), checkpoint_path)
         self.logger.info(f"Saved checkpoint at episode {episode} -> {checkpoint_path}")
@@ -196,7 +196,7 @@ class DDPGTrainer:
         plt.plot(smoothed_episodes, smoothed_rewards, label=f"Smoothed Rewards (window={window_size})", linewidth=2)
         plt.xlabel("Episode")
         plt.ylabel("Reward")
-        plt.title(f"Reward vs Episodes (Epsilon={self.model_config['eps']})")
+        plt.title(f"Reward vs Episodes (Noise Scale={self.model_config['noise_scale']})")
         plt.legend()
         plt.grid()
 
@@ -222,7 +222,7 @@ class DDPGTrainer:
 
         # Adjust layout and show the plots
         plt.tight_layout()
-        plt.savefig(self.training_plots_path / f"DDPG_{self.env_name}_eps{self.model_config['eps']}_alr{float(self.model_config['learning_rate_actor'])}_clr{float(self.model_config['learning_rate_critic'])}_gamma{self.model_config['discount']}_training_plot.png")
+        plt.savefig(self.training_plots_path / f"DDPG_{self.env_name}_noise{self.model_config['noise_scale']}_alr{float(self.model_config['learning_rate_actor'])}_clr{float(self.model_config['learning_rate_critic'])}_gamma{self.model_config['discount']}_training_plot.png")
 
 
     def train(self):
@@ -244,19 +244,19 @@ class DDPGTrainer:
 
             for i_episode in range(1, max_episodes + 1):
                 obs, _info = self.env.reset()
-                # self.agent.reset()
+                self.agent.reset()
                 episode_reward = 0
-
+                win = 0
                 touched = 0
                 first_time_touch = 1
 
                 for t in range(max_timesteps):
                     self.timestep += 1
-                    action = self.agent.act(obs,  epsilon=self.current_epsilon)
+                    action = self.agent.act(obs)
                     next_obs, reward, done, trunc, _info = self.env.step(action)
                     touched = max(touched, _info['reward_touch_puck'])
-                    current_reward = reward + 5 * _info['reward_closeness_to_puck'] - (
-                        1 - touched) * 0.1 + touched * first_time_touch * 0.1 * t
+                    current_reward = reward + 2 * _info['reward_closeness_to_puck'] - (
+                        1 - touched) * 0.1 + touched * first_time_touch * 0.01 * t
 
 
                     first_time_touch = 1 - touched
@@ -271,6 +271,9 @@ class DDPGTrainer:
 
                     if done or trunc:
                         break
+                        
+                if _info['winner'] == 1:
+                    win = 1
 
                 # Perform training updates
                 batch_losses = self.agent.train(num_updates=train_iter)
@@ -285,9 +288,7 @@ class DDPGTrainer:
                         "Reward": episode_reward,
                         "EpisodeLength": t,
                         "TouchRate": touched,
-                        "CurrentEpsilonValue": self.current_epsilon
-                        #"q_loss": batch_losses[0],
-                        #"actor_loss": batch_losses[1]
+                        "WinRate": win
                     })
 
                 # Save checkpoint & stats periodically
@@ -303,7 +304,7 @@ class DDPGTrainer:
                         f"Episode {i_episode}\tAvg Length: {avg_length:.2f}\tAvg Reward: {avg_reward:.3f}"
                     )
 
-                self.current_epsilon = max(self.epsilon_min, self.current_epsilon * self.epsilon_decay)
+                # self.current_epsilon = max(self.epsilon_min, self.current_epsilon * self.epsilon_decay)
 
             # Final stats saved and plotted
             self._save_statistics()

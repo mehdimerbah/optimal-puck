@@ -13,8 +13,6 @@ logger = logging.getLogger(__name__)
 TRAINER_MAP = {
     "DDPG": DDPGTrainer,
 }
-# EXPERIMENT_ID = "Pendulum-v1_DDPG_20250112_200510"
-# EXPERIMENT_PATH = Path("/Users/mehdi/Documents/Tübingen/WiSe24/ReinforcementLearning/Project/optimal-puck/rl_experiments/experiments/Pendulum-v1_DDPG_20250112_200510")
 
 
 def parse_args():
@@ -36,8 +34,7 @@ def get_hyperparameters(config, model_name):
             'learning_rate_critic': config.learning_rate_critic,
             'batch_size': config.batch_size,
             'discount': config.discount,
-            'eps': config.eps,
-            'buffer_size': config.buffer_size
+            'noise_scale': config.noise_scale,
         }
 
     return hyperparameter_map
@@ -76,6 +73,7 @@ def main():
         logger.error(f"Failed to load sweep configuration: {e}")
         return
 
+    
     sweep_id = wandb.sweep(sweep=wandb_config, project="optimal-tuning")
     wandb.agent(sweep_id, function=train_agent)
 
