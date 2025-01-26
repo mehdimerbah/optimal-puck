@@ -166,3 +166,6 @@ rl_experiments/experiments/
 experiments/
 wandb/
 gifs/
+
+# Ignore singularity container
+optimal-puck.sif

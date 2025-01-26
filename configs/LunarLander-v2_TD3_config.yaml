@@ -1,0 +1,43 @@
+environment:
+  name: "LunarLander-v2"
+  continuous: true
+  max_steps: 2000
+
+models:
+  td3:
+    type: "td3"
+    hidden_sizes_actor: [128, 128]
+    hidden_sizes_critic: [128, 128, 64]
+    learning_rate_actor: 0.00001
+    learning_rate_critic: 0.0001
+    buffer_size: 1000000
+    batch_size: 128
+    discount: 0.99
+    eps: 0.1  # Exploration noise
+    policy_noise: 0.2  # Target policy smoothing noise
+    noise_clip: 0.5  # Noise clipping range
+    policy_delay: 2  # Delayed policy updates
+    update_target_every: 100
+    use_target_net: true
+    training:
+      max_episodes: 2000
+      train_iter: 32  # Updates per episode
+      log_interval: 20
+      save_interval: 500
+      eval_interval: 100
+      random_seed: 42
+
+training:
+  max_episodes: 2000
+  train_iter: 32
+  log_interval: 20
+  save_interval: 500
+  eval_interval: 100
+
+evaluation:
+  n_episodes: 10
+  max_steps_per_episode: 2000
+  render: false
+  metrics:
+    - "episode_reward"
+    - "episode_length" 
