@@ -1,6 +1,7 @@
 import yaml
 from pathlib import Path
 from models.ddpg.DDPGTrainer import DDPGTrainer
+from models.td3.TD3Trainer import TD3Trainer
 import argparse
 
 
@@ -27,6 +28,7 @@ def main():
 
     trainer_map = {
         "DDPG": DDPGTrainer,
+        "TD3": TD3Trainer,
         # "PPO": PPOTrainer,
         # "DQN": DQNTrainer,
     }
