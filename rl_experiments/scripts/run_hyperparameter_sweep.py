@@ -1,5 +1,5 @@
 import yaml
-import os
+import sys
 from pathlib import Path
 from models.ddpg.DDPGTrainer import DDPGTrainer
 from models.td3.TD3Trainer import TD3Trainer
@@ -7,8 +7,12 @@ import argparse
 import wandb
 import logging
 
+# Append project root dir to Python path
+project_root = str(Path(__file__).resolve().parents[2])
+sys.path.append(project_root)
+
 # Configure logging
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+logging.basicConfig(level=logging.ERROR, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
 TRAINER_MAP = {
