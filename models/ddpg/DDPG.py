@@ -206,29 +206,6 @@ class DDPGAgent:
             clipped_action = np.clip(noisy_action, self.low, self.high)
             return clipped_action
 
-    # def act(self, observation, epsilon=None, evaluate=False):
-    #     """
-    #     Return action for the given observation, choose an action with eps-greedy strategy.
-    #     """
-    #     self.policy.eval()
-
-    #     # Ensure `obs_tensor` is on the correct device
-    #     obs_tensor = torch.tensor(observation, dtype=torch.float32).to(device).unsqueeze(0)
-        
-    #     with torch.no_grad():
-    #         policy_action = self.policy(obs_tensor)  # still on GPU
-    #     policy_action = policy_action.cpu().numpy()[0] # Now switching to CPU
-        
-    #     # Decide if we explore or exploit
-    #     if np.random.rand() < (epsilon if epsilon is not None else self.epsilon) and not evaluate:
-    #         # Random action in continuous space
-    #         random_action = np.random.uniform(low=self.low, high=self.high)
-    #         action = random_action
-    #     else:
-    #         # Use the deterministic action from policy
-    #         action = policy_action
-
-    #     return action
 
     def store_transition(self, transition):
         """Add a transition (s, a, r, s_next, done) to the replay buffer."""

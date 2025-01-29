@@ -8,7 +8,7 @@ import pickle
 import logging
 import sys
 from pathlib import Path
-from hockey.hockey_env import HockeyEnv_BasicOpponent, Mode
+from hockey.hockey_env import HockeyEnv_BasicOpponent, Mode, HockeyEnv, BasicOpponent
 
 from models.ddpg.DDPG import DDPGAgent
 
@@ -17,21 +17,31 @@ class DDPGTrainer:
     A class for environment interaction, logging, checkpointing, 
     saving statistics, and orchestrating the training loop for DDPG.
     """
-    def __init__(self, env_name, training_config, model_config, experiment_path, wandb_run=None):
+    def __init__(self, env_name, training_config, model_config, experiment_path, env_mode="normal", wandb_run=None):
         # Initialize the environement
         self.env_name = env_name
+        self.env_mode = env_mode
         if self.env_name == "HockeyEnv":
-            self.env = HockeyEnv_BasicOpponent( mode=Mode.NORMAL,   # or Mode.TRAIN_SHOOTING, Mode.TRAIN_DEFENSE,
+            if env_mode == 'train_shooting':
+                self.env = HockeyEnv_BasicOpponent( mode=Mode.TRAIN_SHOOTING,   # or Mode.TRAIN_SHOOTING, Mode.TRAIN_DEFENSE,
                                                weak_opponent=True)
+            elif env_mode =='train_defense':
+                self.env = HockeyEnv_BasicOpponent( mode=Mode.TRAIN_DEFENSE,   # or Mode.TRAIN_SHOOTING, Mode.TRAIN_DEFENSE,
+                                               weak_opponent=True)
+            elif env_mode =='self_play':
+                self.env = HockeyEnv(keep_mode=True, mode="NORMAL") 
+                self.opponent = self._initialize_opponent()
+            else:
+                self.env = HockeyEnv(keep_mode=True, mode="NORMAL")
+                self.opponent = BasicOpponent(weak=True, keep_mode=True)
+
         elif self.env_name == "BipedalWalker-v3":
             self.env = gym.make(env_name, hardcore=False, render_mode="rgb_array")
         else:
             self.env = gym.make(env_name)
 
         self.training_config = training_config
-        # self.current_epsilon = training_config["epsilon_start"]
-        # self.epsilon_min = training_config["epsilon_min"]
-        # self.epsilon_decay = training_config["epsilon_decay"]
+
         self.model_config = model_config
         self.experiment_path = Path(experiment_path)
         self.agent = self._initialize_agent()
@@ -70,6 +80,17 @@ class DDPGTrainer:
         )
         return agent
 
+    # def _initialize_opponent(self):
+    #     """
+    #     Instantiate the DDPGAgent with the config from the 'model_config'.
+    #     """
+    #     agent = DDPGAgent(
+    #         observation_space=self.opp_env.observation_space,
+    #         action_space=self.opp_env.action_space,
+    #         **self.model_config
+    #     )
+    #     return agent
+    
     def _initialize_seed(self):
         seed = self.training_config.get("seed", 42)
         if seed is not None:
@@ -240,7 +261,6 @@ class DDPGTrainer:
             self.logger.info("Starting DDPG Training...")
             self.logger.info(f"Environment: {self.env_name}, max_episodes={max_episodes}, "
                             f"max_timesteps={max_timesteps}, train_iter={train_iter}")
-        
 
             for i_episode in range(1, max_episodes + 1):
                 obs, _info = self.env.reset()
@@ -255,15 +275,14 @@ class DDPGTrainer:
                     action = self.agent.act(obs)
                     next_obs, reward, done, trunc, _info = self.env.step(action)
                     touched = max(touched, _info['reward_touch_puck'])
-                    current_reward = reward + 2 * _info['reward_closeness_to_puck'] - (
-                        1 - touched) * 0.1 + touched * first_time_touch * 0.01 * t
+                    current_reward = reward + 2 * _info['reward_closeness_to_puck'] + 2 * _info['reward_puck_direction'] - (1 - touched) * 0.1 + touched * first_time_touch * 0.01 * t 
 
 
                     first_time_touch = 1 - touched
 
                     self.agent.store_transition((obs, action, current_reward, next_obs, done))
                     obs = next_obs
-                   
+                
                     episode_reward += current_reward
 
                     if render:
@@ -303,9 +322,7 @@ class DDPGTrainer:
                     self.logger.info(
                         f"Episode {i_episode}\tAvg Length: {avg_length:.2f}\tAvg Reward: {avg_reward:.3f}"
                     )
-
-                # self.current_epsilon = max(self.epsilon_min, self.current_epsilon * self.epsilon_decay)
-
+               
             # Final stats saved and plotted
             self._save_statistics()
             self._plot_statistics()
@@ -318,3 +335,107 @@ class DDPGTrainer:
                 
 
             return final_metrics
+    
+    
+    
+    
+    def self_play_training(self):
+        
+        max_episodes   = self.training_config["max_episodes"]
+        max_timesteps  = self.training_config["max_timesteps"]
+        log_interval   = self.training_config.get("log_interval", 20)
+        save_interval  = self.training_config.get("save_interval", 500)
+        render         = self.training_config.get("render", False)
+        train_iter     = self.training_config.get("train_iter", 32)
+
+        self.logger.info("Starting DDPG Training...")
+        self.logger.info(f"Environment: {self.env_name}, max_episodes={max_episodes}, "
+                        f"max_timesteps={max_timesteps}, train_iter={train_iter}")
+    
+        self.opponent = self._initialize_opponent()
+        self.opponent.restore_state(torch.load('rl_experiments/HockeyEnv_DDPG_SelfPlayOpps/DDPG_HockeyEnv_noise0.1_alr0.0001_clr0.0001_gamma0.95_checkpoint_ep10000.pth'))
+
+        for i_episode in range(1, max_episodes + 1):
+            obs, _info = self.env.reset()
+            # (a) Reset both agents
+            self.agent.reset()
+            self.opponent.reset()
+            episode_reward = 0
+            win = 0
+            touched = 0
+            first_time_touch = 1
+            for t in range(max_timesteps):
+                self.timestep += 1
+                obs_agent1 = obs  # The default obs is always from player1's perspective
+                obs_agent2 = self.env.obs_agent_two()  # The environment provides a "mirrored" obs for player2
+
+                # (b) Each agent selects an action
+                act1 = self.agent.act(obs_agent1)  # shape = (4,) if keep_mode=True
+                act2 = self.opponent.act(obs_agent2)  # shape = (4,)
+
+                # (c) Concatenate into one 8D action: first 4 for player1, second 4 for player2
+                combined_act = np.hstack([act1, act2])  # shape = (8,)
+
+                next_obs, reward, done, trunc, _info = self.env.step(combined_act)
+
+                touched = max(touched, _info['reward_touch_puck'])
+                current_reward = reward + 2 * _info['reward_closeness_to_puck'] - (1 - touched) * 0.1 + touched * first_time_touch * 0.01 * t
+                first_time_touch = 1 - touched # + 2 * _info['reward_puck_direction']
+
+                self.agent.store_transition((obs_agent1, act1, current_reward, next_obs, done))
+
+                obs = next_obs
+
+                episode_reward += current_reward
+
+                if render:
+                    self.env.render()
+
+                if done or trunc:
+                    break
+                    
+            if _info['winner'] == 1:
+                win = 1
+
+            # Perform training updates
+            batch_losses = self.agent.train(num_updates=train_iter)
+            self.losses.extend(batch_losses)
+
+            self.rewards.append(episode_reward)
+            self.lengths.append(t)
+
+            # Log to wandb
+            if self.wandb_run is not None:
+                self.wandb_run.log({
+                    "Reward": episode_reward,
+                    "EpisodeLength": t,
+                    "TouchRate": touched,
+                    "WinRate": win
+                })
+
+            # Save checkpoint & stats periodically
+            if i_episode % save_interval == 0:
+                self._save_checkpoint(i_episode)
+                self._save_statistics()
+
+            # Print training progress
+            if i_episode % log_interval == 0:
+                avg_reward = np.mean(self.rewards[-log_interval:])
+                avg_length = np.mean(self.lengths[-log_interval:])
+                self.logger.info(
+                    f"Episode {i_episode}\tAvg Length: {avg_length:.2f}\tAvg Reward: {avg_reward:.3f}"
+                )
+        
+        # Final stats saved and plotted
+        self._save_statistics()
+        self._plot_statistics()
+
+        final_metrics = self._final_metrics()
+
+        if self.wandb_run is not None:
+            self.wandb_run.log({'average_reward': final_metrics['average_reward']})
+            self.wandb_run.summary.update(final_metrics)
+            
+
+        return final_metrics
+    
