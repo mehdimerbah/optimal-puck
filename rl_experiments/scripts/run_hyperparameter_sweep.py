@@ -1,17 +1,23 @@
 import yaml
-import os
+import sys
 from pathlib import Path
 from models.ddpg.DDPGTrainer import DDPGTrainer
+from models.td3.TD3Trainer import TD3Trainer
 import argparse
 import wandb
 import logging
 
+# Append project root dir to Python path
+project_root = str(Path(__file__).resolve().parents[2])
+sys.path.append(project_root)
+
 # Configure logging
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+logging.basicConfig(level=logging.ERROR, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
 TRAINER_MAP = {
     "DDPG": DDPGTrainer,
+    "TD3": TD3Trainer,
 }
 
 
@@ -36,7 +42,17 @@ def get_hyperparameters(config, model_name):
             'discount': config.discount,
             'noise_scale': config.noise_scale,
         }
-
+    elif model_name == "TD3":
+        hyperparameter_map = {
+            'learning_rate_actor': config.learning_rate_actor,
+            'learning_rate_critic': config.learning_rate_critic,
+            'batch_size': config.batch_size,
+            'discount': config.discount,
+            'policy_noise': config.policy_noise,
+            'noise_clip': config.noise_clip,
+            'policy_delay': config.policy_delay,
+            'polyak': config.polyak
+        }
     return hyperparameter_map
 
 def train_agent(config=None):

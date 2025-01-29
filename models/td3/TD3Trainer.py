@@ -10,7 +10,7 @@ import pickle
 import logging
 import sys
 from pathlib import Path
-from datetime import datetime
+from hockey.hockey_env import HockeyEnv_BasicOpponent, Mode
 from .TD3 import TD3Agent
 
 class TD3Trainer:
@@ -21,30 +21,6 @@ class TD3Trainer:
         self.experiment_path = Path(experiment_path)
         self.wandb_run = wandb_run
         
-        # Create environment
-        self.env = gym.make(env_name, continuous=True)
-        self.eval_env = gym.make(env_name, continuous=True)
-        
-        # Set random seeds
-        random_seed = model_config['training']['random_seed']
-        torch.manual_seed(random_seed)
-        np.random.seed(random_seed)
-        self.env.reset(seed=random_seed)
-        self.eval_env.reset(seed=random_seed)
-        
-        # Initialize agent
-        self.agent = TD3Agent(
-            observation_space=self.env.observation_space,
-            action_space=self.env.action_space,
-            **model_config
-        )
-        
-        # Initialize metrics tracking
-        self.rewards = []
-        self.lengths = []
-        self.losses = []
-        self.timestep = 0
-        
         # Create directories for saving
         self.results_path = self.experiment_path / "results"
         self.training_stats_path = self.results_path / "training" / "stats"
@@ -54,145 +30,73 @@ class TD3Trainer:
         for path in [self.training_stats_path, self.training_logs_path, self.training_plots_path]:
             path.mkdir(parents=True, exist_ok=True)
             
-        # Initialize logger
+        # Initialize logger first
         self.logger = self._initialize_logger()
         
-        # Store max steps from model config
-        self.max_steps = model_config.get('max_steps', 2000)  # Default to 2000 if not specified
-
-    def evaluate_policy(self, eval_episodes=10):
-        avg_reward = 0.
-        for _ in range(eval_episodes):
-            state, _ = self.eval_env.reset()
-            done = False
-            truncated = False
-            while not (done or truncated):
-                action = self.agent.act(state, eps=0)  # No exploration during evaluation
-                state, reward, done, truncated, _ = self.eval_env.step(action)
-                avg_reward += reward
-        avg_reward /= eval_episodes
-        return avg_reward
-
-    def save_checkpoint(self, episode, metrics):
-        checkpoint = {
-            'model_state': self.agent.state(),
-            'metrics': metrics,
-            'episode': episode,
-            'timestamp': datetime.now().isoformat()
-        }
-        torch.save(checkpoint, self.model_dir / f'checkpoint_episode_{episode}.pt')
-
-    def train(self):
+        # Create environment - handle HockeyEnv first before any gym.make calls
+        if self.env_name == "HockeyEnv":
+            self.env = HockeyEnv_BasicOpponent(mode=Mode.NORMAL, weak_opponent=False)
+            self.eval_env = HockeyEnv_BasicOpponent(mode=Mode.NORMAL, weak_opponent=False)
+        else:
+            self.env = gym.make(env_name)
+            self.eval_env = gym.make(env_name)
+        
+        # Initialize seeds
+        self._initialize_seed()
+        
+        # Initialize agent
+        self.agent = self._initialize_agent()
+        
+        # Initialize metrics tracking
+        self.rewards = []
+        self.lengths = []
+        self.losses = []
+        self.timestep = 0
+        
+    def _initialize_seed(self):
         """
-        Main training loop that interacts with the environment, collects transitions,
-        and trains the agent.
+        Sets the random seed for PyTorch, NumPy, and the environment's reset() method.
         """
-        max_episodes = self.training_config["max_episodes"]
-        max_timesteps = self.training_config.get("max_timesteps", self.max_steps)
-        log_interval = self.training_config.get("log_interval", 20)
-        save_interval = self.training_config.get("save_interval", 500)
-        train_iter = self.training_config.get("train_iter", 32)
+        seed = self.training_config.get("seed", 42)
+        if seed is not None:
+            torch.manual_seed(seed)
+            np.random.seed(seed)
+            self.env.reset(seed=seed)
+            self.logger.info(f"Initialized random seeds to {seed}.")
 
-        self.logger.info("Starting TD3 Training...")
-        self.logger.info(f"Environment: {self.env_name}, max_episodes={max_episodes}, "
-                        f"max_timesteps={max_timesteps}, train_iter={train_iter}")
+    def _initialize_agent(self):
+        """
+        Simple helper that constructs and returns a TD3Agent instance 
+        with the config from the 'model_config'.
+        """
+        return TD3Agent(
+            observation_space=self.env.observation_space,
+            action_space=self.env.action_space,
+            **self.model_config
+        )
 
-        best_eval_reward = float('-inf')
-
-        for i_episode in range(1, max_episodes + 1):
-            state, _ = self.env.reset()
-            self.agent.noise.reset()
-            episode_reward = 0
-            episode_losses = []
-
-            for t in range(max_timesteps):
-                self.timestep += 1
-                
-                # Select action with exploration noise during training
-                action = self.agent.act(state, eps=self.model_config.get('eps', 0.1))
-                
-                # Execute action
-                next_state, reward, done, truncated, _ = self.env.step(action)
-                episode_reward += reward
-                
-                # Store transition
-                self.agent.store_transition((state, action, reward, next_state, done))
-                
-                # Train agent if enough samples
-                if self.agent.buffer.size >= self.model_config['batch_size']:
-                    losses = self.agent.train(iter_fit=train_iter)
-                    episode_losses.extend(losses)
-                
-                if done or truncated:
-                    self.logger.info(f"Episode {i_episode} finished after {t+1} steps with reward {episode_reward:.2f}")
-                    break
-                    
-                state = next_state
-
-            # Log training progress
-            self.rewards.append(episode_reward)
-            self.lengths.append(t)
-            self.losses.extend(episode_losses)
-
-            # Log to wandb if available
-            if self.wandb_run is not None:
-                self.wandb_run.log({
-                    "reward": episode_reward,
-                    "length": t,
-                    "q_loss": np.mean([l[0] for l in episode_losses]) if episode_losses else None,
-                    "actor_loss": np.mean([l[1] for l in episode_losses]) if episode_losses else None
-                })
-            
-            # Print training progress every log_interval episodes
-            if i_episode % log_interval == 0:
-                avg_reward = np.mean(self.rewards[-log_interval:])
-                avg_length = np.mean(self.lengths[-log_interval:])
-                avg_q_loss = np.mean([l[0] for l in episode_losses]) if episode_losses else 0
-                avg_actor_loss = np.mean([l[1] for l in episode_losses]) if episode_losses else 0
-                
-                self.logger.info(
-                    f"Episode {i_episode}\tAvg Length: {avg_length:.2f}\tAvg Reward: {avg_reward:.3f}\t"
-                    f"Q-Loss: {avg_q_loss:.4f}\tActor-Loss: {avg_actor_loss:.4f}"
-                )
-                
-                # Evaluate policy without exploration noise
-                eval_reward = self.evaluate_policy()
-                self.logger.info(f"Evaluation reward: {eval_reward:.2f}")
-                
-                # Save if best
-                if eval_reward > best_eval_reward:
-                    best_eval_reward = eval_reward
-                    self.logger.info(f"New best evaluation reward: {best_eval_reward:.2f}")
-                    self._save_checkpoint(i_episode)
-            
-            # Save checkpoint and statistics periodically
-            if i_episode % save_interval == 0:
-                self._save_checkpoint(i_episode)
-                self._save_statistics()
-                self._plot_statistics()
-
-        # Final saves and cleanup
-        self._save_checkpoint(max_episodes)
-        self._save_statistics()
-        self._plot_statistics()
-        
-        # Close environments
-        self.env.close()
-        self.eval_env.close()
-        
-        final_metrics = self._final_metrics()
-        
-        if self.wandb_run is not None:
-            self.wandb_run.log({'average_reward': final_metrics['average_reward']})
-            self.wandb_run.summary.update(final_metrics)
-        
-        return final_metrics
+    def _get_file_prefix(self):
+        """
+        Creates a standardized file prefix containing all hyperparameter information.
+        """
+        return (
+            f"TD3_{self.env_name}_alr{float(self.model_config['learning_rate_actor'])}"
+            f"_clr{float(self.model_config['learning_rate_critic'])}"
+            f"_gamma{self.model_config['discount']}"
+            f"_policyNoise{self.model_config['policy_noise']}"
+            f"_noiseClip{self.model_config['noise_clip']}"
+            f"_policyDelay{self.model_config['policy_delay']}"
+            f"_polyak{self.model_config['polyak']}"
+        )
 
     def _initialize_logger(self):
         """
-        Configure a logger that logs to both stdout and a file.
+        Configures a logger that:
+          - Writes logs to a file named with hyperparameter details
+          - Also logs to console (stdout)
+          - Applies a consistent format (timestamp, log level, message)
         """
-        log_file = self.training_logs_path / f"TD3_{self.env_name}_eps{self.model_config['eps']}_alr{float(self.model_config['learning_rate_actor'])}_clr{float(self.model_config['learning_rate_critic'])}_gamma{self.model_config['discount']}.log"
+        log_file = self.training_logs_path / f"{self._get_file_prefix()}.log"
 
         # Create a logger
         logger = logging.getLogger("TD3_Trainer")
@@ -226,7 +130,7 @@ class TD3Trainer:
         """
         Saves a pickle file containing training statistics.
         """
-        stats_file = self.training_stats_path / f"TD3_{self.env_name}_eps{self.model_config['eps']}_alr{float(self.model_config['learning_rate_actor'])}_clr{float(self.model_config['learning_rate_critic'])}_gamma{self.model_config['discount']}_stats.pkl"
+        stats_file = self.training_stats_path / f"{self._get_file_prefix()}_stats.pkl"
         data = {
             "rewards": self.rewards,
             "lengths": self.lengths,
@@ -243,7 +147,7 @@ class TD3Trainer:
         """
         saved_models_dir = self.results_path / "training" / "saved_models"
         saved_models_dir.mkdir(parents=True, exist_ok=True)
-        checkpoint_path = saved_models_dir / f"TD3_{self.env_name}_eps{self.model_config['eps']}_alr{float(self.model_config['learning_rate_actor'])}_clr{float(self.model_config['learning_rate_critic'])}_gamma{self.model_config['discount']}_checkpoint_ep{episode}.pth"
+        checkpoint_path = saved_models_dir / f"{self._get_file_prefix()}_checkpoint_ep{episode}.pth"
 
         torch.save(self.agent.state(), checkpoint_path)
         self.logger.info(f"Saved checkpoint at episode {episode} -> {checkpoint_path}")
@@ -307,7 +211,7 @@ class TD3Trainer:
         plt.plot(smoothed_episodes, smoothed_rewards, label=f"Smoothed Rewards (window={window_size})", linewidth=2)
         plt.xlabel("Episode")
         plt.ylabel("Reward")
-        plt.title(f"Reward vs Episodes (Epsilon={self.model_config['eps']})")
+        plt.title("Reward vs Episodes")
         plt.legend()
         plt.grid()
 
@@ -333,5 +237,101 @@ class TD3Trainer:
 
         # Adjust layout and save
         plt.tight_layout()
-        plt.savefig(self.training_plots_path / f"TD3_{self.env_name}_eps{self.model_config['eps']}_alr{float(self.model_config['learning_rate_actor'])}_clr{float(self.model_config['learning_rate_critic'])}_gamma{self.model_config['discount']}_training_plot.png")
+        plt.savefig(self.training_plots_path / f"{self._get_file_prefix()}_training_plot.png")
         plt.close()
+
+    def train(self):
+        """
+        Main training loop that interacts with the environment, collects transitions,
+        and trains the agent.
+        """
+        max_episodes = self.training_config["max_episodes"]
+        max_timesteps = self.training_config.get("max_timesteps")
+        log_interval = self.training_config.get("log_interval", 20)
+        save_interval = self.training_config.get("save_interval", 500)
+        train_iter = self.training_config.get("train_iter", 32)
+        render = self.training_config.get("render", False)
+
+        self.logger.info("Starting TD3 Training...")
+        self.logger.info(f"Environment: {self.env_name}, max_episodes={max_episodes}, "
+                        f"max_timesteps={max_timesteps}, train_iter={train_iter}")
+
+        for i_episode in range(1, max_episodes + 1):
+            obs, _info = self.env.reset()
+            episode_reward = 0
+            touched = 0
+            first_time_touch = 1
+
+            for t in range(max_timesteps):
+                self.timestep += 1
+                action = self.agent.act(obs)
+                next_obs, reward, done, trunc, _info = self.env.step(action)
+                
+                touched = max(touched, _info.get('reward_touch_puck', 0))
+                current_reward = reward
+                if self.env_name == "HockeyEnv":
+                    current_reward = reward + 5 * _info['reward_closeness_to_puck'] - (
+                        1 - touched) * 0.1 + touched * first_time_touch * 0.1 * t
+                    first_time_touch = 1 - touched
+
+                self.agent.store_transition((obs, action, current_reward, next_obs, done))
+                obs = next_obs
+                episode_reward += current_reward
+
+                if render:
+                    self.env.render()
+
+                if done or trunc:
+                    break
+
+            # Perform training updates
+            batch_losses = self.agent.train(num_updates=train_iter)
+            self.losses.extend(batch_losses)
+
+            self.rewards.append(episode_reward)
+            self.lengths.append(t)
+
+            # Log to wandb
+            if self.wandb_run is not None:
+                if batch_losses:  # Only calculate if there are losses
+                    q_losses = [l[0] for l in batch_losses]
+                    actor_losses = [l[1] for l in batch_losses]
+                    avg_q_loss = np.mean(q_losses)
+                    avg_actor_loss = np.mean(actor_losses)
+                else:
+                    avg_q_loss = 0.0
+                    avg_actor_loss = 0.0
+
+                self.wandb_run.log({
+                    "Reward": episode_reward,
+                    "EpisodeLength": t,
+                    "TouchRate": touched,
+                    "Q_Loss": avg_q_loss,
+                    "Actor_Loss": avg_actor_loss
+                })
+
+            # Save checkpoint & stats periodically
+            if i_episode % save_interval == 0:
+                self._save_checkpoint(i_episode)
+                self._save_statistics()
+
+            # Print training progress
+            if i_episode % log_interval == 0:
+                avg_reward = np.mean(self.rewards[-log_interval:])
+                avg_length = np.mean(self.lengths[-log_interval:])
+                self.logger.info(
+                    f"Episode {i_episode}\tAvg Length: {avg_length:.2f}\tAvg Reward: {avg_reward:.3f}"
+                )
+
+        # Final stats saved and plotted
+        self._save_statistics()
+        self._plot_statistics()
+
+        final_metrics = self._final_metrics()
+
+        if self.wandb_run is not None:
+            self.wandb_run.log({'average_reward': final_metrics['average_reward']})
+            self.wandb_run.summary.update(final_metrics)
+            
+
+        return final_metrics

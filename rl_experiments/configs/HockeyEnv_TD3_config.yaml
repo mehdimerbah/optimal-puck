@@ -1,0 +1,45 @@
+environment:
+  name: "HockeyEnv"
+  max_episode_steps: 250
+  
+training:
+  max_episodes: 10000
+  max_timesteps: 250
+  seed: 42
+  log_interval: 20
+  save_interval: 1000
+  render: false
+  train_iter: 32
+
+model:
+  name: "TD3"
+  wandb_sweep_config:
+    name: "HockeyEnv_TD3"
+    method: "grid"
+    metric:
+      name: "average_reward"
+      goal: "maximize"
+    parameters:
+      batch_size:
+        values: [128]
+      learning_rate_actor:
+        values: [1e-4, 1e-3]
+      learning_rate_critic:
+        values: [1e-4, 1e-3]
+      discount:
+        values: [0.95, 0.99]
+      policy_noise:
+        values: [0.1, 0.2]
+      noise_clip:
+        values: [0.0, 0.2, 0.5]
+      policy_delay:
+        values: [2, 3, 4, 5]
+      polyak:
+        values: [0.995, 0.999]
+
+evaluation:
+  n_episodes: 10
+  max_steps_per_episode: 250
+  metrics:
+    - "mean_return"
+    - "episode_length"

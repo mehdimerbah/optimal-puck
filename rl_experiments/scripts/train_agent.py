@@ -1,8 +1,13 @@
 import yaml
+import sys
 from pathlib import Path
 from models.ddpg.DDPGTrainer import DDPGTrainer
+from models.td3.TD3Trainer import TD3Trainer
 import argparse
 
+# Append project root dir to Python path
+project_root = str(Path(__file__).resolve().parents[2])
+sys.path.append(project_root)
 
 def main():
     parser = argparse.ArgumentParser(description='Train an agent for a specified experiment')
@@ -27,6 +32,7 @@ def main():
 
     trainer_map = {
         "DDPG": DDPGTrainer,
+        "TD3": TD3Trainer,
         # "PPO": PPOTrainer,
         # "DQN": DQNTrainer,
     }

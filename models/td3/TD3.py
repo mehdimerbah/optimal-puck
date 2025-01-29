@@ -13,13 +13,10 @@ Key Features:
 import torch
 import torch.nn as nn
 import numpy as np
-import gymnasium as gym
 from gymnasium import spaces
-import optparse
-from pathlib import Path
 
-from ..baseline_alt.memory import Memory
-from ..baseline_alt.feedforward import Feedforward
+from ..baseline.memory import Memory
+from ..baseline.feedforward import Feedforward
 
 # Global constants
 DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -294,13 +291,14 @@ class TD3Agent:
             eps=1e-6
         )
 
-    def act(self, observation, eps=None):
+    def act(self, observation, eps=None, evaluate=False):
         """
         Selects action using the current policy and exploration noise.
         
         Args:
             observation: Environment observation
             eps: Optional override for exploration noise scale
+            evaluate: If True, disables exploration noise
             
         Returns:
             ndarray: Selected action
@@ -311,6 +309,9 @@ class TD3Agent:
             action = self.policy(obs_tensor).cpu().numpy()
         
         # Add exploration noise if not evaluating
+        if evaluate:
+            return action
+            
         if eps is not None:
             self.noise.sigma = eps
         if eps != 0:  # Only add noise during training
@@ -348,7 +349,7 @@ class TD3Agent:
             num_updates (int): Number of training iterations
 
         Returns:
-            list: Training losses
+            list: List of (critic_loss, actor_loss) tuples per iteration
         """
         losses = []
         self.train_iter += 1
@@ -398,14 +399,15 @@ class TD3Agent:
             # Update critic
             q_target = q_target.view(-1, 1)
             q_loss = self.Q.fit(states, actions, q_target)
-            losses.append(q_loss)
+            
+            # Default actor loss is 0.0 when no update occurs
+            actor_loss_val = 0.0
 
             # Delayed policy updates
             if i % self.config["policy_delay"] == 0:
                 # Update actor using actor_optimizer
                 self.policy.train()
                 a_pred = self.policy(states)
-                # Q_value returns shape
                 actor_loss = -self.Q.Q_value(states, a_pred).mean()
 
                 self.policy_optimizer.zero_grad()
@@ -413,12 +415,15 @@ class TD3Agent:
                 # Implement gradient clipping for actor
                 torch.nn.utils.clip_grad_norm_(self.policy.parameters(), max_norm=1.0)
                 self.policy_optimizer.step()
-                losses.append(actor_loss.item())
+                actor_loss_val = actor_loss.item()
 
                 # Update target networks
                 if self.config["use_target_net"]:
                     self._soft_update(self.Q_target, self.Q)
                     self._soft_update(self.policy_target, self.policy)
+
+            # Store both losses as a tuple for this iteration
+            losses.append((q_loss, actor_loss_val))
 
         return losses
 
@@ -449,124 +454,3 @@ class TD3Agent:
         """Resets exploration noise process for new episode."""
         self.noise.reset()
 
-def main():
-    """Main training script."""
-    # Parse command line arguments
-    parser = optparse.OptionParser()
-    parser.add_option('-e', '--env', type='string', dest='env_name',
-                     default="Pendulum-v1", help='Environment name')
-    parser.add_option('-n', '--eps', type='float', dest='eps',
-                     default=0.1, help='Exploration noise scale')
-    parser.add_option('-t', '--train', type='int', dest='train',
-                     default=8, help='Training iterations per episode')
-    parser.add_option('-l', '--lr_actor', type='float', dest='lr_actor',
-                     default=0.0003, help='Actor learning rate')
-    parser.add_option('-c', '--lr_critic', type='float', dest='lr_critic',
-                     default=0.0003, help='Critic learning rate')
-    parser.add_option('-m', '--maxepisodes', type='float', dest='max_episodes',
-                     default=2000, help='Maximum training episodes')
-    parser.add_option('-s', '--seed', type='int', dest='seed',
-                     default=42, help='Random seed')
-    parser.add_option('-w', '--warmup', type='int', dest='warmup_steps',
-                     default=25000, help='Warm-up steps with random actions')
-    
-    opts, _ = parser.parse_args()
-
-    # Environment setup
-    env_name = opts.env_name
-    env = gym.make(env_name)
-
-    # Training parameters
-    max_episodes = int(opts.max_episodes)
-    max_timesteps = env.spec.max_episode_steps if hasattr(env.spec, 'max_episode_steps') else 2000
-    train_iter = opts.train
-    log_interval = 20
-    render = False
-
-    # Set random seeds
-    if opts.seed is not None:
-        torch.manual_seed(opts.seed)
-        np.random.seed(opts.seed)
-        env.action_space.seed(opts.seed)
-        env.observation_space.seed(opts.seed)
-
-    # Initialize agent
-    agent = TD3Agent(
-        observation_space=env.observation_space,
-        action_space=env.action_space,
-        eps=opts.eps,
-        learning_rate_actor=opts.lr_actor,
-        learning_rate_critic=opts.lr_critic,
-        warmup_steps=opts.warmup_steps
-    )
-
-    # Training metrics
-    rewards = []
-    lengths = []
-    losses = []
-    timestep = 0
-
-    # Warm-up period with random actions
-    print("Starting warm-up period with random actions...")
-    ob, _ = env.reset()
-    for _ in range(opts.warmup_steps):
-        action = env.action_space.sample()
-        ob_new, reward, done, trunc, _ = env.step(action)
-        agent.store_transition((ob, action, reward, ob_new, done))
-        ob = ob_new if not (done or trunc) else env.reset()[0]
-    print(f"Warm-up complete. Collected {opts.warmup_steps} random transitions.")
-
-    # Training loop
-    for i_episode in range(1, max_episodes + 1):
-        ob, _info = env.reset()
-        agent.reset_noise()
-        total_reward = 0
-
-        # Episode loop
-        for t in range(max_timesteps):
-            timestep += 1
-            if render:
-                env.render()
-
-            # Select and execute action
-            action = agent.act(ob)
-            ob_new, reward, done, trunc, _info = env.step(action)
-            total_reward += reward
-
-            # Store experience
-            agent.store_transition((ob, action, reward, ob_new, done))
-            
-            if done or trunc:
-                break
-            ob = ob_new
-
-        # Train after each episode
-        losses_batch = agent.train(train_iter)
-        losses.extend(losses_batch)
-        rewards.append(total_reward)
-        lengths.append(t)
-
-        # Periodic saving
-        if i_episode % 500 == 0:
-            print("########## Saving checkpoint... ##########")
-            ckpt_path = Path("results") / f"TD3_{env_name}_{i_episode}-eps{opts.eps}-t{train_iter}-l{opts.lr_actor}-s{opts.seed}.pth"
-            ckpt_path.parent.mkdir(exist_ok=True)
-            torch.save(agent.state(), ckpt_path)
-            save_statistics(i_episode)
-
-        # Logging
-        if i_episode % log_interval == 0:
-            avg_reward = np.mean(rewards[-log_interval:])
-            avg_length = int(np.mean(lengths[-log_interval:]))
-            avg_loss = np.mean(losses[-log_interval:]) if len(losses) >= log_interval else np.mean(losses)
-            print(f"Episode {i_episode}\t "
-                  f"avg length: {avg_length}\t "
-                  f"avg reward: {avg_reward:.2f}\t "
-                  f"avg loss: {avg_loss:.4f}")
-
-    # Final save
-    save_statistics(i_episode)
-    env.close()
-
-if __name__ == '__main__':
-    main()
