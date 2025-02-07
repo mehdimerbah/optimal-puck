@@ -53,6 +53,9 @@ class TD3Trainer:
         self.losses = []
         self.timestep = 0
         
+        # Initialize win tracking
+        self.win_history = []
+        
     def _initialize_seed(self):
         """
         Sets the random seed for PyTorch, NumPy, and the environment's reset() method.
@@ -87,6 +90,7 @@ class TD3Trainer:
             f"_noiseClip{self.model_config['noise_clip']}"
             f"_policyDelay{self.model_config['policy_delay']}"
             f"_polyak{self.model_config['polyak']}"
+            f"_warmupSteps{self.model_config['warmup_steps']}"
         )
 
     def _initialize_logger(self):
@@ -165,12 +169,14 @@ class TD3Trainer:
 
         avg_reward = float(np.mean(self.rewards)) if len(self.rewards) > 0 else 0.0
         avg_length = float(np.mean(self.lengths)) if len(self.lengths) > 0 else 0.0
+        win_rate = float(np.mean(self.win_history)) if len(self.win_history) > 0 else 0.0
 
         metrics = {
             "average_reward": avg_reward,
             "average_length": avg_length,
             "final_q_loss": final_q_loss,
-            "final_actor_loss": final_actor_loss
+            "final_actor_loss": final_actor_loss,
+            "win_rate": win_rate
         }
         self.logger.info(f"Final training metrics: {metrics}")
         return metrics
@@ -245,8 +251,9 @@ class TD3Trainer:
         Main training loop that interacts with the environment, collects transitions,
         and trains the agent.
         """
-        max_episodes = self.training_config["max_episodes"]
+        max_episodes = self.training_config.get("max_episodes")
         max_timesteps = self.training_config.get("max_timesteps")
+        warmup_steps = self.model_config.get("warmup_steps")
         log_interval = self.training_config.get("log_interval", 20)
         save_interval = self.training_config.get("save_interval", 500)
         train_iter = self.training_config.get("train_iter", 32)
@@ -254,7 +261,20 @@ class TD3Trainer:
 
         self.logger.info("Starting TD3 Training...")
         self.logger.info(f"Environment: {self.env_name}, max_episodes={max_episodes}, "
-                        f"max_timesteps={max_timesteps}, train_iter={train_iter}")
+                        f"max_timesteps={max_timesteps}, train_iter={train_iter}, "
+                        f"warmup_steps={warmup_steps}")
+
+        # Warmup phase with random actions
+        total_steps = 0
+        obs, _info = self.env.reset()
+        self.logger.info(f"Warmup phase started...")
+        while total_steps < warmup_steps:
+            action = self.env.action_space.sample()
+            next_obs, reward, done, trunc, _info = self.env.step(action)
+            self.agent.store_transition((obs, action, reward, next_obs, done))
+            obs = next_obs if not (done or trunc) else self.env.reset()[0]
+            total_steps += 1
+        self.logger.info(f"Warmup phase completed: {warmup_steps} random steps collected")
 
         for i_episode in range(1, max_episodes + 1):
             obs, _info = self.env.reset()
@@ -264,6 +284,8 @@ class TD3Trainer:
 
             for t in range(max_timesteps):
                 self.timestep += 1
+                total_steps += 1
+
                 action = self.agent.act(obs)
                 next_obs, reward, done, trunc, _info = self.env.step(action)
                 
@@ -273,6 +295,10 @@ class TD3Trainer:
                     current_reward = reward + 5 * _info['reward_closeness_to_puck'] - (
                         1 - touched) * 0.1 + touched * first_time_touch * 0.1 * t
                     first_time_touch = 1 - touched
+
+                    # Track wins at episode end
+                    if done or trunc:
+                        self.win_history.append(1 if _info.get("winner", 0) == 1 else 0)
 
                 self.agent.store_transition((obs, action, current_reward, next_obs, done))
                 obs = next_obs
@@ -302,13 +328,20 @@ class TD3Trainer:
                     avg_q_loss = 0.0
                     avg_actor_loss = 0.0
 
+                # Calculate running averages for metrics
+                window = min(100, len(self.rewards))
+                avg_reward = np.mean(self.rewards[-window:])
+                win_rate = np.mean(self.win_history[-window:]) if len(self.win_history) > 0 else 0.0
+
                 self.wandb_run.log({
                     "Reward": episode_reward,
                     "EpisodeLength": t,
                     "TouchRate": touched,
                     "Q_Loss": avg_q_loss,
-                    "Actor_Loss": avg_actor_loss
-                })
+                    "Actor_Loss": avg_actor_loss,
+                    "average_reward": avg_reward,
+                    "win_rate": win_rate  # Primary metric for hyperparameter tuning
+                }, step=i_episode)
 
             # Save checkpoint & stats periodically
             if i_episode % save_interval == 0:
@@ -319,8 +352,10 @@ class TD3Trainer:
             if i_episode % log_interval == 0:
                 avg_reward = np.mean(self.rewards[-log_interval:])
                 avg_length = np.mean(self.lengths[-log_interval:])
+                avg_win_rate = np.mean(self.win_history[-log_interval:]) if len(self.win_history) > 0 else 0.0
                 self.logger.info(
-                    f"Episode {i_episode}\tAvg Length: {avg_length:.2f}\tAvg Reward: {avg_reward:.3f}"
+                    f"Episode {i_episode}\tAvg Length: {avg_length:.2f}\t"
+                    f"Avg Reward: {avg_reward:.3f}\tWin Rate: {avg_win_rate:.3f}"
                 )
 
         # Final stats saved and plotted
@@ -330,7 +365,7 @@ class TD3Trainer:
         final_metrics = self._final_metrics()
 
         if self.wandb_run is not None:
-            self.wandb_run.log({'average_reward': final_metrics['average_reward']})
+            self.wandb_run.log({'average_reward': final_metrics['average_reward'], 'win_rate': final_metrics['win_rate']})
             self.wandb_run.summary.update(final_metrics)
             
 

@@ -51,7 +51,8 @@ def get_hyperparameters(config, model_name):
             'policy_noise': config.policy_noise,
             'noise_clip': config.noise_clip,
             'policy_delay': config.policy_delay,
-            'polyak': config.polyak
+            'polyak': config.polyak,
+            'warmup_steps': config.warmup_steps
         }
     return hyperparameter_map
 
