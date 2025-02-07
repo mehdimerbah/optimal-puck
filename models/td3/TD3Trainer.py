@@ -159,6 +159,7 @@ class TD3Trainer:
     def _final_metrics(self):
         """
         Return final metrics after training finishes.
+        Uses a fixed evaluation window for a consistent view of performance.
         """
         if len(self.losses) > 0:
             final_q_loss = self.losses[-1][0]
@@ -167,9 +168,19 @@ class TD3Trainer:
             final_q_loss = None
             final_actor_loss = None
 
-        avg_reward = float(np.mean(self.rewards)) if len(self.rewards) > 0 else 0.0
+        # Use a fixed window (last 100 episodes) for final metrics
+        final_window = 100
+        if len(self.rewards) >= final_window:
+            avg_reward = float(np.mean(self.rewards[-final_window:]))
+        else:
+            avg_reward = float(np.mean(self.rewards)) if len(self.rewards) > 0 else 0.0
+
+        if self.win_history and len(self.win_history) >= final_window:
+            win_rate = float(np.mean(self.win_history[-final_window:]))
+        else:
+            win_rate = float(np.mean(self.win_history)) if len(self.win_history) > 0 else 0.0
+
         avg_length = float(np.mean(self.lengths)) if len(self.lengths) > 0 else 0.0
-        win_rate = float(np.mean(self.win_history)) if len(self.win_history) > 0 else 0.0
 
         metrics = {
             "average_reward": avg_reward,
@@ -328,7 +339,7 @@ class TD3Trainer:
                     avg_q_loss = 0.0
                     avg_actor_loss = 0.0
 
-                # Calculate running averages for metrics
+                # Calculate running averages for metrics (using last 100 episodes)
                 window = min(100, len(self.rewards))
                 avg_reward = np.mean(self.rewards[-window:])
                 win_rate = np.mean(self.win_history[-window:]) if len(self.win_history) > 0 else 0.0
@@ -368,5 +379,4 @@ class TD3Trainer:
             self.wandb_run.log({'average_reward': final_metrics['average_reward'], 'win_rate': final_metrics['win_rate']})
             self.wandb_run.summary.update(final_metrics)
             
-
         return final_metrics
