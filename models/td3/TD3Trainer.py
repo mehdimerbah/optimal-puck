@@ -10,7 +10,7 @@ import pickle
 import logging
 import sys
 from pathlib import Path
-from hockey.hockey_env import HockeyEnv_BasicOpponent, Mode
+import imageio
 from .TD3 import TD3Agent
 
 class TD3Trainer:
@@ -23,11 +23,13 @@ class TD3Trainer:
         
         # Create directories for saving
         self.results_path = self.experiment_path / "results"
-        self.training_stats_path = self.results_path / "training" / "stats"
-        self.training_logs_path = self.results_path / "training" / "logs"
-        self.training_plots_path = self.results_path / "training" / "plots"
+        self.training_stats_path = self.experiment_path / "results/training/stats"
+        self.training_logs_path = self.experiment_path / "results/training/logs"
+        self.training_plots_path = self.experiment_path / "results/training/plots"
+        # Create evaluation GIF directory
+        self.evaluation_gifs_path = self.experiment_path / "results/evaluation/gifs"
         
-        for path in [self.training_stats_path, self.training_logs_path, self.training_plots_path]:
+        for path in [self.training_stats_path, self.training_logs_path, self.training_plots_path, self.evaluation_gifs_path]:
             path.mkdir(parents=True, exist_ok=True)
             
         # Initialize logger first
@@ -155,6 +157,26 @@ class TD3Trainer:
 
         torch.save(self.agent.state(), checkpoint_path)
         self.logger.info(f"Saved checkpoint at episode {episode} -> {checkpoint_path}")
+
+    def _save_gif(self, episode="final"):
+        """
+        Runs one evaluation episode using self.eval_env, collects frames, and saves a GIF.
+        If no episode argument is given, defaults to 'final'.
+        """
+        frames = []
+        obs, info = self.eval_env.reset()
+        done = False
+        while not done:
+            frame_rgb = self.eval_env.render(mode='rgb_array')
+            frames.append(frame_rgb)
+            action = self.agent.act(obs, evaluate=True)
+            obs, reward, done, trunc, info = self.eval_env.step(action)
+            if done or trunc:
+                break
+        gif_filename = f"{self._get_file_prefix()}_checkpoint_ep{episode}.gif"
+        gif_path = self.evaluation_gifs_path / gif_filename
+        imageio.mimsave(str(gif_path), frames, fps=15)
+        self.logger.info(f"Saved evaluation GIF to {gif_path}")
 
     def _final_metrics(self):
         """
@@ -339,8 +361,8 @@ class TD3Trainer:
                     avg_q_loss = 0.0
                     avg_actor_loss = 0.0
 
-                # Calculate running averages for metrics (using last 100 episodes)
-                window = min(100, len(self.rewards))
+                # Calculate running averages for metrics (using last 50 episodes)
+                window = min(50, len(self.rewards))
                 avg_reward = np.mean(self.rewards[-window:])
                 win_rate = np.mean(self.win_history[-window:]) if len(self.win_history) > 0 else 0.0
 
@@ -354,10 +376,11 @@ class TD3Trainer:
                     "win_rate": win_rate  # Primary metric for hyperparameter tuning
                 }, step=i_episode)
 
-            # Save checkpoint & stats periodically
+            # Save checkpoint & stats periodically, then save a GIF.
             if i_episode % save_interval == 0:
                 self._save_checkpoint(i_episode)
                 self._save_statistics()
+                self._save_gif(i_episode)
 
             # Print training progress
             if i_episode % log_interval == 0:
@@ -372,7 +395,8 @@ class TD3Trainer:
         # Final stats saved and plotted
         self._save_statistics()
         self._plot_statistics()
-
+        self._save_gif()
+        
         final_metrics = self._final_metrics()
 
         if self.wandb_run is not None:
