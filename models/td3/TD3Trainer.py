@@ -11,15 +11,17 @@ import logging
 import sys
 from pathlib import Path
 import imageio
+from hockey.hockey_env import HockeyEnv_BasicOpponent, Mode, CENTER_X, CENTER_Y, VIEWPORT_W, VIEWPORT_H, SCALE
 from .TD3 import TD3Agent
 
 class TD3Trainer:
-    def __init__(self, env_name, training_config, model_config, experiment_path, wandb_run=None):
+    def __init__(self, env_name, training_config, model_config, experiment_path, wandb_run=None, agent_role="player1"):
         self.env_name = env_name
         self.training_config = training_config
         self.model_config = model_config
         self.experiment_path = Path(experiment_path)
         self.wandb_run = wandb_run
+        self.agent_role = agent_role
         
         # Create directories for saving
         self.results_path = self.experiment_path / "results"
@@ -84,9 +86,10 @@ class TD3Trainer:
         """
         Creates a standardized file prefix containing all hyperparameter information.
         """
-        return (
-            f"TD3_{self.env_name}_alr{float(self.model_config['learning_rate_actor'])}"
-            f"_clr{float(self.model_config['learning_rate_critic'])}"
+        prefix = (
+            f"TD3_{self.env_name}"
+            f"_alr{self.model_config['learning_rate_actor']:.4g}"
+            f"_clr{self.model_config['learning_rate_critic']:.4g}"
             f"_gamma{self.model_config['discount']}"
             f"_policyNoise{self.model_config['policy_noise']}"
             f"_noiseClip{self.model_config['noise_clip']}"
@@ -94,6 +97,20 @@ class TD3Trainer:
             f"_polyak{self.model_config['polyak']}"
             f"_warmupSteps{self.model_config['warmup_steps']}"
         )
+        rs = self.model_config.get("reward_shaping", {})
+        aim_char = str(rs.get("aim_multiplier", 0))[0]
+        defend_char = str(rs.get("defend_multiplier", 0))[0]
+        block_char = str(rs.get("block_multiplier", 0))[0]
+        touch_char = str(rs.get("touch_multiplier", 0))[0]
+        closeness_char = str(rs.get("closeness_multiplier", 0))[0]
+        wall_char = str(rs.get("wall_multiplier", 0))[0]
+        rs_str = (f"_a{aim_char}"
+                f"_d{defend_char}"
+                f"_b{block_char}"
+                f"_t{touch_char}"
+                f"_c{closeness_char}"
+                f"_w{wall_char}")
+        return prefix + rs_str
 
     def _initialize_logger(self):
         """
@@ -297,6 +314,20 @@ class TD3Trainer:
                         f"max_timesteps={max_timesteps}, train_iter={train_iter}, "
                         f"warmup_steps={warmup_steps}")
 
+        # Define parameters for reward shaping
+        reward_params = {
+            "aim_threshold": 0.8,
+            "aim_multiplier": 0.1,
+            "defend_multiplier": 0.1,
+            "block_multiplier": 0.1,
+            "touch_multiplier": 0.1,
+            "max_defense_distance": 100.0,
+            "max_offset": 20.0,
+            "closeness_multiplier": 0.1,
+            "wall_threshold": 0.8,
+            "wall_multiplier": 0.1
+        }
+
         # Warmup phase with random actions
         total_steps = 0
         obs, _info = self.env.reset()
@@ -315,6 +346,15 @@ class TD3Trainer:
             touched = 0
             first_time_touch = 1
 
+            # Initialize accumulators for logging
+            base_reward_sum = 0.0
+            reward_aim_sum = 0.0
+            reward_defend_sum = 0.0
+            reward_block_sum = 0.0
+            touch_bonus_sum = 0.0
+            closeness_reward_sum = 0.0
+            reward_wall_sum = 0.0
+
             for t in range(max_timesteps):
                 self.timestep += 1
                 total_steps += 1
@@ -324,14 +364,126 @@ class TD3Trainer:
                 
                 touched = max(touched, _info.get('reward_touch_puck', 0))
                 current_reward = reward
+
+                # Extra reward shaping is applied for HockeyEnv
                 if self.env_name == "HockeyEnv":
-                    current_reward = reward + 5 * _info['reward_closeness_to_puck'] - (
-                        1 - touched) * 0.1 + touched * first_time_touch * 0.1 * t
+                    # Compute the width and height of the playing field in scaled units
+                    W = VIEWPORT_W / SCALE
+                    H = VIEWPORT_H / SCALE
+
+                    # === Extract Environment Information Based on Agent Role ===
+                    # For player1:
+                    #   - The observation stores player1 position relative to [CENTER_X, CENTER_Y] in obs[0:2]
+                    #   - The puck position relative to [CENTER_X, CENTER_Y] is in obs[12:14]
+                    #   - The puck velocity is in obs[14:16]
+                    # For player2:
+                    #   - The observation is mirrored
+                    #   - Puck positions and velocities are also mirrored
+                    if self.agent_role == "player1":
+                        player_abs = np.array(obs[0:2]) + np.array([CENTER_X, CENTER_Y])
+                        player_angle = obs[2]
+                        puck_abs = np.array(obs[12:14]) + np.array([CENTER_X, CENTER_Y])
+                        puck_vel = np.array(obs[14:16])
+                        # For player1, the opponents goal is on the right side
+                        opponent_goal = np.array([W/2 + 245.0/SCALE + 10.0/SCALE, H/2])
+                        own_goal = np.array([W/2 - 245.0/SCALE - 10.0/SCALE, H/2])
+                    else:  # self.agent_role == "player2"
+                        player_abs = -np.array(obs[0:2]) + np.array([CENTER_X, CENTER_Y])
+                        player_angle = obs[2]
+                        puck_abs = -np.array(obs[12:14]) + np.array([CENTER_X, CENTER_Y])
+                        puck_vel = -np.array(obs[14:16])
+                        # For player2, swap the goals:
+                        opponent_goal = np.array([W/2 - 245.0/SCALE - 10.0/SCALE, H/2])
+                        own_goal = np.array([W/2 + 245.0/SCALE + 10.0/SCALE, H/2])
+
+                    # === Aim Reward ===
+                    # Calculate the facing direction from agent angle
+                    player_facing = np.array([np.cos(player_angle), np.sin(player_angle)])
+                    # Calculate the target direction to the opponent goal
+                    to_goal = opponent_goal - player_abs
+                    # Calculate the alignment of facing and target directions
+                    aim_alignment = np.dot(player_facing, to_goal / (np.linalg.norm(to_goal) + 1e-6))
+                    # Only the alignment beyond the threshold is rewarded, scaled by aim multiplier
+                    reward_aim = max(0, aim_alignment - reward_params["aim_threshold"]) * reward_params["aim_multiplier"]
+
+                    # === Wall Reward ===
+                    # Activated when the puck is near the top or bottom walls
+                    reward_wall = 0.0
+                    if puck_abs[1] < 20.0 or puck_abs[1] > (VIEWPORT_H - 20.0):
+                        # Only compute if the puck is moving
+                        if np.linalg.norm(puck_vel) > 1e-6:
+                            # Compute the vector from the puck to the opponent goal
+                            puck_to_goal = opponent_goal - puck_abs
+                            # Compute the alignment of puck velocity and the direction to the opponent goal
+                            alignment = np.dot(puck_vel / (np.linalg.norm(puck_vel) + 1e-6),
+                                            puck_to_goal / (np.linalg.norm(puck_to_goal) + 1e-6))
+                            # Check if alignment above a treshold, reward scaled by wall multiplier
+                            reward_wall = max(0, alignment - reward_params["wall_threshold"]) * reward_params["wall_multiplier"]
+
+                    # Last observation element indicates puck possession
+                    opponent_has_puck = obs[-1] > 0
+
+                    # === Defensive Rewards ===
+                    if opponent_has_puck:
+                        # DEFEND REWARD: Encourage to move towards own goal
+                        # Compute the distance between the agent and its own goal
+                        distance_to_own = np.linalg.norm(player_abs - own_goal)
+                        # Reward based on the distance to the own goal, scaled by defend multiplier
+                        reward_defend = max(0, 1 - (distance_to_own / reward_params["max_defense_distance"])) * reward_params["defend_multiplier"]
+
+                        # BLOCK REWARD: Encourage to position between own goal and puck
+                        # Compute the vector from own goal to the puck
+                        puck_vector = puck_abs - own_goal
+                        if np.linalg.norm(puck_vector) > 1e-6:
+                            # Project agent position onto the line from its own goal to the puck
+                            projection = np.dot(player_abs - own_goal, puck_vector) / (np.linalg.norm(puck_vector)**2) * puck_vector
+                            # Take difference between the agent's position and the projection
+                            perp = player_abs - own_goal - projection
+                            d = np.linalg.norm(perp)
+                        else:
+                            d = 0
+                        # Reward based on the offset from the blocking position, scaled by block multiplier
+                        reward_block = max(0, 1 - d / reward_params["max_offset"]) * reward_params["block_multiplier"]
+                    else:
+                        reward_defend = 0.0
+                        reward_block = 0.0
+
+                    # === Closeness Reward ===
+                    # Rewarding the closeness to the puck
+                    closeness_reward = reward_params["closeness_multiplier"] * _info.get('reward_closeness_to_puck', 0)
+
+                    # === Touch Bonus ===
+                    # No touch results in a small penalty, while touching gives a timestep-scaled bonus
+                    touch_term = - (1 - touched) * reward_params["touch_multiplier"] \
+                                + touched * first_time_touch * reward_params["touch_multiplier"] * t
+
+                    # Combine the rewards
+                    base_reward = reward
+                    current_reward = (base_reward 
+                                    + reward_aim 
+                                    + reward_wall 
+                                    + reward_defend 
+                                    + reward_block 
+                                    + closeness_reward 
+                                    + touch_term)
+                    # Touch bonus is only applied on the first touch
                     first_time_touch = 1 - touched
+
+                    # Update accumulators for logging
+                    base_reward_sum += base_reward
+                    reward_aim_sum += reward_aim
+                    reward_defend_sum += reward_defend
+                    reward_block_sum += reward_block
+                    touch_bonus_sum += touch_term
+                    closeness_reward_sum += closeness_reward
+                    reward_wall_sum += reward_wall
 
                     # Track wins at episode end
                     if done or trunc:
-                        self.win_history.append(1 if _info.get("winner", 0) == 1 else 0)
+                        if self.agent_role == "player1":
+                            self.win_history.append(1 if _info.get("winner", 0) == 1 else 0)
+                        else:  # For player2, winner == -1
+                            self.win_history.append(1 if _info.get("winner", 0) == -1 else 0)
 
                 self.agent.store_transition((obs, action, current_reward, next_obs, done))
                 obs = next_obs
@@ -370,10 +522,17 @@ class TD3Trainer:
                     "Reward": episode_reward,
                     "EpisodeLength": t,
                     "TouchRate": touched,
+                    "Base_Reward": base_reward_sum,
+                    "Closeness_Reward": closeness_reward_sum,
+                    "Aim_Reward": reward_aim_sum,
+                    "Wall_Reward": reward_wall_sum,
+                    "Defend_Reward": reward_defend_sum,
+                    "Block_Reward": reward_block_sum,
+                    "Touch_Bonus": touch_bonus_sum,
                     "Q_Loss": avg_q_loss,
                     "Actor_Loss": avg_actor_loss,
                     "average_reward": avg_reward,
-                    "win_rate": win_rate  # Primary metric for hyperparameter tuning
+                    "win_rate": win_rate
                 }, step=i_episode)
 
             # Save checkpoint & stats periodically, then save a GIF.
