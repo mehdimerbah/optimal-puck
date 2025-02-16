@@ -1,12 +1,11 @@
 environment:
   name: "HockeyEnv"
-  mode: "NORMAL"        # NORMAL, TRAIN_SHOOTING, TRAIN_DEFENSE
-  opponent_type: "none" # Oder z.B. "basic_weak", "basic_strong", "self_play"
+  mode: "NORMAL"
+  opponent_type: "none"
   max_episode_steps: 250
 
 training:
-  # Allgemeine Trainings-Parameter
-  max_episodes: 5000
+  max_episodes: 500
   max_timesteps: 250
   seed: 42
   log_interval: 20
@@ -17,37 +16,22 @@ training:
 model:
   name: "Dreamer"
   config:
-
-    latent_dim: 32
-    wm_hidden_size: 64
-    actor_hidden_size: 64
-    critic_hidden_size: 64
-    world_model_lr: 0.001
+    deter_dim: 64
+    stoch_dim: 32
+    wm_lr: 0.001
     actor_lr: 0.0001
     critic_lr: 0.0001
+    alpha_lr_ext: 0.0001
+    alpha_lr_int: 0.0001
     discount: 0.99
-    buffer_size: 100000      # Größe des Replay-Buffers
+    buffer_size: 100000
     batch_size: 64
-    grad_updates_per_step: 1
-
-  # Konfiguration für WandB Sweep (optional; wird nur benötigt, wenn du Sweeps verwenden willst)
-  wandb_sweep_config:
-    name: "HockeyEnv_Dreamer"
-    method: "grid"
-    metric:
-      name: "average_reward"
-      goal: "maximize"
-    parameters:
-      batch_size:
-        values: [64, 128]
-      world_model_lr:
-        values: [1e-3, 5e-4]
-      actor_lr:
-        values: [1e-4, 5e-5]
-      critic_lr:
-        values: [1e-4, 1e-5]
-      discount:
-        values: [0.95, 0.99]
+    actor_horizon: 5
+    plan2explore_size: 5
+    plan2explore_scale: 1.0
+    icm_scale: 0.2
+    target_kl: 1.0
+    trust_region_scale: 0.05
 
 evaluation:
   n_episodes: 10
