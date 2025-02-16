@@ -12,6 +12,12 @@ A Dreamer-V3-like script featuring:
  - 'kl_loss' fix
  - Adaptive Gradient Clipping (AGC) + Cosine LR
  - Value Normalization for Critic's lambda-returns
+
+Now extended with:
+ - Inference RNN tracking in act() (so we don't re-init every step)
+ - A stub 'ImageDecoder' in the world model for reconstruction
+ - Placeholder code for SSIM or image-based reconstruction metrics
+ - An example evaluate_latents() for evaluating the agent's latents
 """
 
 import math
@@ -33,8 +39,8 @@ torch.set_num_threads(1)
 def adaptive_gradient_clipping(parameters, clip_factor=0.05, eps=1e-3):
     """
     Applies AGC (Adaptive Gradient Clipping) to a list of parameters.
-    Clamps grad magnitudes based on parameter norms.
-    This is a simpler version of the concept used in fairscale or jax's optax.
+    This clamps grad magnitudes based on parameter norms, helping stabilize training.
+    This is a simplified approach reminiscent of fairscale or optax's AGC.
     """
     parameters = [p for p in parameters if p.grad is not None]
     for p in parameters:
@@ -300,34 +306,139 @@ class SlowRSSM(nn.Module):
 
 
 # --------------------------------------------------------------------------------
-# 5) WorldModel with ICM + reward/done heads
+# 5) ImageDecoder (placeholder) for reconstruction/SSIM
+# --------------------------------------------------------------------------------
+class ImageDecoder(nn.Module):
+    """
+    A placeholder image decoder.
+    This would reconstruct an observation (e.g. a 64x64 RGB image) from the latent state.
+    Here we only place a MLP stub. You would adapt it to a transposed CNN or similar for real images.
+    """
+    def __init__(self, latent_dim=128, image_shape=(3,64,64)):
+        super().__init__()
+        self.latent_dim = latent_dim
+        self.image_shape = image_shape
+        # Minimal MLP
+        out_dim = int(np.prod(image_shape))
+        self.decoder = Feedforward(latent_dim, [256,256], out_dim)
+
+    def forward(self, latent):
+        """
+        latent shape: [B, latent_dim]
+        returns: reconstructed images, shape = [B, *image_shape]
+        """
+        x = self.decoder(latent)
+        x = torch.sigmoid(x)  # in [0,1]
+        x = x.view(x.shape[0], *self.image_shape)
+        return x
+
+
+class VectorDecoder(nn.Module):
+    """
+    A simple decoder that reconstructs a vector observation.
+    Use this if your environment observation is a flat vector (e.g. 18D in HockeyEnv).
+    """
+
+    def __init__(self, latent_dim=128, obs_shape=(18,)):
+        super().__init__()
+        self.latent_dim = latent_dim
+        self.obs_shape = obs_shape
+        out_dim = int(np.prod(obs_shape))
+        # Example: two hidden layers of size 256 each
+        self.decoder = nn.Sequential(
+            nn.Linear(latent_dim, 256),
+            nn.ReLU(),
+            nn.Linear(256, 256),
+            nn.ReLU(),
+            nn.Linear(256, out_dim)
+        )
+
+    def forward(self, latent):
+        """
+        latent: [B, latent_dim] => returns [B, *obs_shape]
+        """
+        x = self.decoder(latent)
+        x = x.view(x.shape[0], *self.obs_shape)  # e.g. [B, 18]
+        return x
+
+# --------------------------------------------------------------------------------
+# 6) WorldModel with ICM + reward/done + optional ImageDecoder
 # --------------------------------------------------------------------------------
 class RSSMWorldModel(nn.Module):
     """
-    RSSM + forward model (ICM) + reward/done
+    RSSM + forward model (ICM) + reward/done + optional Decoder (VectorDecoder oder ImageDecoder).
     """
-    def __init__(self, obs_dim, act_dim, deter_dim=64, stoch_dim=32):
+
+    def __init__(self, obs_dim, act_dim, deter_dim=64, stoch_dim=32, use_decoder=False,
+                 decoder_obs_shape=None, is_image_obs=False):
+        """
+        Args:
+          obs_dim: dimension of the environment observation (e.g. 18 for HockeyEnv).
+          act_dim: dimension of the action (e.g. 4 if continuous).
+          deter_dim, stoch_dim: RSSM dimensions.
+          use_decoder: whether to enable reconstruction
+          decoder_obs_shape: shape of the observation for reconstruction
+              if is_image_obs=True, might be (3,64,64),
+              otherwise for vector env, something like (18,)
+          is_image_obs: set True if your environment returns images, so we use an ImageDecoder.
+        """
         super().__init__()
+
         self.rssm = RSSM(obs_dim, act_dim, deter_dim, stoch_dim)
-        in_dim = (2*deter_dim + stoch_dim + act_dim)
+        in_dim = (2 * deter_dim + stoch_dim + act_dim)
+
         self.reward_head = Feedforward(in_dim, [64], 1)
-        self.done_head   = Feedforward(in_dim, [64], 1)
+        self.done_head = Feedforward(in_dim, [64], 1)
         self.forward_model = Feedforward(in_dim, [64], stoch_dim)
+
+        self.use_decoder = use_decoder
+        self.decoder = None
+
+        if self.use_decoder:
+            if decoder_obs_shape is None:
+                # fallback => assume vector env of length obs_dim
+                decoder_obs_shape = (obs_dim,)
+
+            if is_image_obs:
+                # If you actually had image data (3x64x64) => use the old ImageDecoder
+                dec_in_dim = 2 * deter_dim + stoch_dim
+                self.decoder = ImageDecoder(latent_dim=dec_in_dim, image_shape=decoder_obs_shape)
+            else:
+                # For a vector env like Hockey: use VectorDecoder
+                dec_in_dim = 2 * deter_dim + stoch_dim
+                self.decoder = VectorDecoder(latent_dim=dec_in_dim, obs_shape=decoder_obs_shape)
 
     def init_state(self, batch_size):
         return self.rssm.init_state(batch_size)
 
     def forward(self, prev_state, action, obs):
+        """
+        RSSM forward pass:
+         next_state, stats = rssm(...)
+         r_pred, done_pred, st_pred
+        """
         next_state, stats = self.rssm(prev_state, action, obs)
         d1, d2, st = next_state
         feat = torch.cat([d1, d2, st, action], dim=-1)
+
         r_pred = self.reward_head(feat)
         done_logit = self.done_head(feat)
         stoch_pred = self.forward_model(feat)
         return next_state, stats, r_pred, done_logit, stoch_pred
 
+    def decode(self, d1, d2, st):
+        """
+        If we use a decoder, reconstruct either a vector or an image.
+        """
+        if not self.use_decoder or (self.decoder is None):
+            return None
+        latent = torch.cat([d1, d2, st], dim=-1)  # shape [B, 2*deter_dim + stoch_dim]
+        recon = self.decoder(latent)  # shape [B, obs_dim] or [B, 3,64,64], etc.
+        return recon
+
+
 # --------------------------------------------------------------------------------
-# 6) Plan2Explore ensemble
+# 7) Plan2Explore ensemble
 # --------------------------------------------------------------------------------
 class Plan2ExploreModel(nn.Module):
     """
@@ -354,7 +465,7 @@ class Plan2ExploreModel(nn.Module):
         return var.mean(dim=-1, keepdim=True) # [B,1]
 
 # --------------------------------------------------------------------------------
-# 7) Actor & Critic
+# 8) Actor & Critic
 # --------------------------------------------------------------------------------
 class Actor(nn.Module):
     def __init__(self, latent_dim, action_space, hidden_size=64):
@@ -388,12 +499,15 @@ class Critic(nn.Module):
         return self.net(latent).squeeze(-1)
 
 # --------------------------------------------------------------------------------
-# 8) The DreamerV3Agent with:
+# 9) The DreamerV3Agent with:
 #    - SlowTarget RSSM
 #    - PER
 #    - alpha_ext, alpha_int
 #    - lambda_return with a running mean std on returns
 #    - AGC-optimized training + Cosine LR
+#    - RNN tracking in act()
+#    - Optional image reconstruction metrics stubs
+#    - evaluate_latents() example
 # --------------------------------------------------------------------------------
 
 def soft_update_params(source: nn.Module, target: nn.Module, tau=0.01):
@@ -416,6 +530,7 @@ class DreamerV3Agent:
             "per_alpha": 0.6,
             "per_beta": 0.4,
             "agc_clip": 0.05,  # AGC factor
+            "use_decoder": False,  # if we want to reconstruct images
         }
         defaults.update(config)
         self.cfg = defaults
@@ -434,9 +549,11 @@ class DreamerV3Agent:
 
         # 1) World Model + slow
         self.world_model = RSSMWorldModel(
-            obs_dim=self.obs_dim, act_dim=self.act_dim,
+            obs_dim=self.obs_dim,
+            act_dim=self.act_dim,
             deter_dim=self.cfg["deter_dim"],
-            stoch_dim=self.cfg["stoch_dim"]
+            stoch_dim=self.cfg["stoch_dim"],
+            use_decoder=self.cfg["use_decoder"]
         ).to(device)
         self.slow_rssm = SlowRSSM(
             self.obs_dim, self.act_dim,
@@ -461,14 +578,13 @@ class DreamerV3Agent:
         self.opt_alpha_ext = torch.optim.Adam([self.log_alpha_ext], lr=self.cfg["alpha_lr_ext"])
         self.opt_alpha_int = torch.optim.Adam([self.log_alpha_int], lr=self.cfg["alpha_lr_int"])
 
-        # 5) Build optimizers with AGC -> we can define a small wrapper
+        # 5) Build optimizers with AGC -> normal Adam + AGC after .backward()
         from torch.optim.lr_scheduler import CosineAnnealingLR
         self.wm_params = list(self.world_model.parameters())
         self.ens_params= list(self.plan2explore.parameters())
         self.actor_params = list(self.actor.parameters())
         self.critic_params= list(self.critic.parameters())
 
-        # We'll use normal Adam here, but manually apply AGC afterwards
         self.wm_opt = torch.optim.Adam(self.wm_params, lr=self.cfg["wm_lr"])
         self.ens_opt= torch.optim.Adam(self.ens_params,self.cfg["wm_lr"])
         self.actor_opt=torch.optim.Adam(self.actor_params,lr=self.cfg["actor_lr"])
@@ -511,6 +627,9 @@ class DreamerV3Agent:
             self.action_scale = None
             self.action_bias  = None
 
+        # RNN Inference State for 'act()'
+        self.inference_state = None
+
     @property
     def alpha_ext(self):
         return torch.exp(self.log_alpha_ext)
@@ -518,24 +637,55 @@ class DreamerV3Agent:
     def alpha_int(self):
         return torch.exp(self.log_alpha_int)
 
+    def reset_inference_state(self, batch_size=1):
+        """
+        Clears or resets the internal RNN state used by act().
+        """
+        self.inference_state = self.world_model.rssm.init_state(batch_size)
+
     def reset(self):
-        pass
+        """
+        Resets any internal inference state if needed.
+        Currently, we just reset_inference_state() so that
+        our act() method starts from a fresh RSSM state.
+        """
+        self.reset_inference_state()
 
     @torch.no_grad()
     def act(self, obs, sample=True):
+        """
+        Now we track an internal RNN state for inference.
+        This is crucial if you want consistent latents across steps
+        for e.g. latent video or reconstructions.
+        """
+        if self.inference_state is None:
+            self.reset_inference_state(batch_size=1)
+
         obs_t = torch.tensor(obs, dtype=torch.float32, device=device).unsqueeze(0)
-        # No RNN mgmt for inference example
-        d1, d2, st = self.world_model.rssm.init_state(1)
-        lat = torch.cat([d1, d2, st], dim=-1)
-        a, dist = self.actor(lat, sample=sample)
+        # One step of RSSM with previous state
+        next_st, stats = self.world_model.rssm(self.inference_state,
+                                               # action is unknown?
+                                               # We pass dummy zeros if we want pure prior or do something
+                                               torch.zeros((1, self.action_space.shape[0]), device=device)
+                                                if not self.is_discrete else
+                                                torch.zeros((1, self.act_dim), device=device),
+                                               obs_t)
+        self.inference_state = next_st
+        # If you prefer, you can do a 'prior only' or a 'posterior' with the observation.
+        # For a real environment, you'd typically do a posterior update with obs.
+
+        # Then actor picks action from the new latents
+        (d1, d2, st) = next_st
+        latent = torch.cat([d1, d2, st], dim=-1)
+        action, dist = self.actor(latent, sample=sample)
         if not self.is_discrete:
-            a = a*self.action_scale + self.action_bias
-        return a.cpu().numpy()[0]
+            action = action*self.action_scale + self.action_bias
+        return action.cpu().numpy()[0]
 
     def store_transition(self, transition):
         """
         We can store a disagreement-based priority if we want:
-        For now, we pass priority=1.
+        For now, we pass priority=1.0.
         """
         prio = 1.0
         self.buffer.add_transition(transition, priority=prio)
@@ -661,10 +811,8 @@ class DreamerV3Agent:
                                 (1. - lam) * values[:, t + 1] + lam * G[:, t + 1]
                         )
                 # Return normalization
-                # we store all G => update RMS
                 self.return_rms.update(G.detach().cpu().numpy().reshape(-1))
 
-                # Convert mean and std to Torch tensors on the same device as G
                 meanR_t = torch.tensor(self.return_rms.mean, device=G.device, dtype=G.dtype)
                 stdR_t = torch.tensor(self.return_rms.std, device=G.device, dtype=G.dtype)
 
@@ -771,6 +919,80 @@ class DreamerV3Agent:
 
         return -total_val
 
+    def compute_reconstruction_metrics(self, d1, d2, st, true_obs):
+        """
+        Pseudocode for e.g. SSIM or MSE with the image_decoder.
+        This is a placeholder. Adjust to your data or real model.
+        """
+        if (not self.cfg["use_decoder"]) or (self.world_model.image_decoder is None):
+            return {}
+        recon = self.world_model.decode(d1, d2, st)
+        if recon is None:
+            return {}
+        # Suppose true_obs shape is (B,3,64,64), in [0,1].
+        # We do MSE:
+        mse_val = F.mse_loss(recon, true_obs)
+        # Pseudocode for SSIM or something else:
+        # ssim_val = ssim_function(recon, true_obs)
+        return {"recon_mse": mse_val.item()}
+
+    @torch.no_grad()
+    def evaluate_latents(self, env, episodes=1, max_steps=200):
+        """
+        Example method to evaluate latent space or do reconstruction.
+        We track the real latent sequence by using the posterior update each step with env obs.
+        Then optionally decode images or compute metrics.
+        """
+        results = []
+        for ep in range(episodes):
+            obs, info = env.reset()
+            # We'll do a B=1 init
+            state = self.world_model.init_state(batch_size=1)
+            ep_latents = []
+            ep_metrics = []
+            ep_reward = 0.0
+            for t in range(max_steps):
+                obs_t = torch.tensor(obs, dtype=torch.float32, device=device).unsqueeze(0)
+                # We'll do a "posterior" step => pass real obs to RSSM
+                # We also need an action => ephemeral.
+                # For purely collecting latents, set action=0
+                # or sample from actor. Let's do actor:
+                lat_feat = torch.cat([state[0], state[1], state[2]], dim=-1)
+                action, dist = self.actor(lat_feat, sample=False)
+                if not self.is_discrete:
+                    action_real = (action*self.action_scale + self.action_bias).cpu().numpy()[0]
+                else:
+                    action_real = int(action.cpu().numpy()[0])
+                next_obs, reward, done, trunc, info = env.step(action_real)
+                ep_reward+= reward
+
+                # RSSM posterior => next state
+                next_st, stats = self.world_model.rssm(state, torch.tensor(action_real, dtype=torch.float32, device=device).unsqueeze(0), obs_t)
+                ep_latents.append(next_st)
+
+                # Optionally compute reconstruction metrics:
+                # d1,d2,st => decode => compare to obs
+                # if obs is an image, let's say shape [3,64,64]
+                if self.cfg["use_decoder"]:
+                    # We do a placeholder
+                    # we must reshape obs to [B,C,H,W], scaled in [0,1].
+                    # MSE or SSIM...
+                    d1, d2, stc = next_st
+                    d1, d2, stc = d1.detach(), d2.detach(), stc.detach()
+                    # if your obs is e.g. 64x64x3, rearrange => (3,64,64).
+                    # ignoring potential shape mismatch
+                    obs_norm = torch.tensor(next_obs, dtype=torch.float32, device=device).unsqueeze(0).permute(0,3,1,2)/255.0
+                    # We do a quick check:
+                    recons = self.compute_reconstruction_metrics(d1, d2, stc, obs_norm)
+                    ep_metrics.append(recons)
+
+                if done or trunc:
+                    break
+                obs = next_obs
+                state = next_st
+            results.append({"episode_reward": ep_reward, "latent_sequence": ep_latents, "metrics": ep_metrics})
+        return results
+
     def state(self):
         return {
             "world_model": self.world_model.state_dict(),
@@ -805,5 +1027,3 @@ class DreamerV3Agent:
         self.actor_opt.load_state_dict(ckpt["actor_opt"])
         self.critic_opt.load_state_dict(ckpt["critic_opt"])
         self.global_step= ckpt["global_step"]
-
-

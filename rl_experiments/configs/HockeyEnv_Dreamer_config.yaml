@@ -5,11 +5,11 @@ environment:
   max_episode_steps: 250
 
 training:
-  max_episodes: 500
-  max_timesteps: 250
+  max_episodes: 50000
+  max_timesteps: 200
   seed: 42
   log_interval: 20
-  save_interval: 500
+  save_interval: 200
   render: false
   train_iter: 32
 
@@ -32,6 +32,28 @@ model:
     icm_scale: 0.2
     target_kl: 1.0
     trust_region_scale: 0.05
+
+  wandb_sweep_config:
+    name: "Dreamer_Sweep"
+    method: "bayes"  # Alternativ: "grid" oder "random"
+    metric:
+      name: "average_reward"
+      goal: "maximize"
+    parameters:
+      world_model_lr:
+        values: [5e-4, 1e-3]
+      actor_lr:
+        values: [3e-5, 1e-4]
+      critic_lr:
+        values: [3e-5, 1e-4]
+      discount:
+        values: [0.95, 0.99]
+      plan2explore_scale:
+        values: [0.5, 1.0, 2.0]
+      batch_size:
+        values: [32, 64, 128]
+      buffer_size:
+        values: [5000, 10000]
 
 evaluation:
   n_episodes: 10
