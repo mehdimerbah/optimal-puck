@@ -51,7 +51,16 @@ def get_hyperparameters(config, model_name):
             'policy_noise': config.policy_noise,
             'noise_clip': config.noise_clip,
             'policy_delay': config.policy_delay,
-            'polyak': config.polyak
+            'polyak': config.polyak,
+            'warmup_steps': config.warmup_steps,
+            'reward_shaping': {
+                'aim_multiplier': config.get("reward_shaping.aim_multiplier", 0.0),
+                'defend_multiplier': config.get("reward_shaping.defend_multiplier", 0.0),
+                'block_multiplier': config.get("reward_shaping.block_multiplier", 0.0),
+                'touch_multiplier': config.get("reward_shaping.touch_multiplier", 0.0),
+                'wall_multiplier': config.get("reward_shaping.wall_multiplier", 0.0),
+                'closeness_multiplier': config.get("reward_shaping.closeness_multiplier", 0.0)
+            }
         }
     return hyperparameter_map
 
