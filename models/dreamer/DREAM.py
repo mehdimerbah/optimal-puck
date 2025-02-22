@@ -1,25 +1,12 @@
 """
 DREAM.py
 
-A Dreamer-V3-like script featuring:
- - Multi-layer RSSM (2-layer GRU)
- - Forward-Model Curiosity (ICM)
- - Plan2Explore Ensemble -> Disagreement-based Intrinsic Reward
- - Separate alpha_ext, alpha_int (Dual SAC-Style)
- - Lambda-return for the Critic
- - Slow Target RSSM
- - Prioritized Sequence Replay (PER) with Weighted IS
- - 'kl_loss' fix
- - Adaptive Gradient Clipping (AGC) + Cosine LR
- - Value Normalization for Critic's lambda-returns
-
-Now extended with:
- - Inference RNN tracking in act() (so we don't re-init every step)
- - A stub 'ImageDecoder' in the world model for reconstruction
- - Placeholder code for SSIM or image-based reconstruction metrics
- - An example evaluate_latents() for evaluating the agent's latents
+Ein Agent-Skript, das ein WorldModel (mit ImagBehavior) nutzt und verschiedene
+Explorations-Module (Random, Plan2Explore) einbindet. Dazu kommt ein Replay-Puffer,
+Priorizierte Sequences und ein Agent, der all das zusammenfasst.
 """
 
+import os
 import math
 import random
 import numpy as np
@@ -29,40 +16,57 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
 from gymnasium import spaces
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-torch.set_num_threads(1)
+# Eventuell wichtig, falls du MuJoCo oder andere Grafiksachen benötigst
+os.environ["MUJOCO_GL"] = "osmesa"
 
-# --------------------------------------------------------------------------------
-# 0) Additional utilities: Weighted PER with Weighted IS, AGC, etc.
-# --------------------------------------------------------------------------------
+# ---------------------------------------------------------
+# 1) Imports deiner Module (wenn sie in anderen Dateien liegen)
+# ---------------------------------------------------------
+# Passe die folgenden Imports an deinen tatsächlichen Pfad an.
+# z. B.:
+# from models.dreamer.world_model import WorldModel
+# from models.dreamer.imag_behavior import ImagBehavior
+# from models.dreamer.exploration import Random, Plan2Explore
+# from models.dreamer.Replay import Replay
+
+from models.dreamer.world_model import WorldModel
+from models.dreamer.imag_behavior import ImagBehavior
+from models.dreamer.exploration import Random, Plan2Explore
+from models.dreamer.Replay import Replay
+
+# Falls du Tools wie `tools.Every`, `tools.Once` etc. brauchst, importiere sie hier
+# from models.dreamer import tools
+
+# Optional: Für Kompilierung via PyTorch 2.0
+USE_TORCH_COMPILE = False
+
+# ---------------------------------------------------------
+# 2) Device-Einstellungen und Hilfsfunktionen
+# ---------------------------------------------------------
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+torch.set_num_threads(1)  # optional
 
 def adaptive_gradient_clipping(parameters, clip_factor=0.05, eps=1e-3):
     """
-    Applies AGC (Adaptive Gradient Clipping) to a list of parameters.
-    This clamps grad magnitudes based on parameter norms, helping stabilize training.
-    This is a simplified approach reminiscent of fairscale or optax's AGC.
+    Optional: AGC (Adaptive Gradient Clipping).
     """
-    parameters = [p for p in parameters if p.grad is not None]
-    for p in parameters:
+    params = [p for p in parameters if p.grad is not None]
+    for p in params:
         param_norm = p.data.norm(2)
         grad_norm = p.grad.data.norm(2)
         if param_norm == 0 or grad_norm == 0:
             continue
-        ratio = (grad_norm / (param_norm + eps))
+        ratio = grad_norm / (param_norm + eps)
         if ratio > clip_factor:
             p.grad.data.mul_(clip_factor / (ratio + eps))
 
-# --------------------------------------------------------------------------------
-# 1) Exceptions and RunningMeanStd
-# --------------------------------------------------------------------------------
 class UnsupportedSpace(Exception):
     pass
 
+# ---------------------------------------------------------
+# 3) RunningMeanStd (z. B. für Reward-Normalisierung)
+# ---------------------------------------------------------
 class RunningMeanStd:
-    """
-    Tracks mean and variance in a streaming fashion.
-    Used for e.g. normalizing rewards or returns.
-    """
     def __init__(self, epsilon=1e-5, shape=()):
         self.epsilon = epsilon
         self.count = 0
@@ -72,14 +76,15 @@ class RunningMeanStd:
     def update(self, x):
         x = np.asarray(x)
         self.count += x.shape[0]
-        delta = x.mean(axis=0) - self.mean
+        bmean = x.mean(axis=0)
+        delta = bmean - self.mean
         self.mean += delta * (x.shape[0] / self.count)
-        delta2 = x.mean(axis=0) - self.mean
-        self.M2 += (x - self.mean).T @ (x - self.mean)
+        delta2 = bmean - self.mean
+        self.M2 += ((x - self.mean)**2).sum()
 
     @property
     def var(self):
-        return self.M2 / max(self.count - 1, 1)
+        return self.M2 / max(self.count, 1)
 
     @property
     def std(self):
@@ -88,942 +93,400 @@ class RunningMeanStd:
     def normalize(self, x):
         return (x - self.mean) / (self.std + 1e-8)
 
-# --------------------------------------------------------------------------------
-# 2) Prioritized Sequence Replay (Episode-level, Weighted IS version)
-# --------------------------------------------------------------------------------
-class PrioritizedSequenceMemory:
-    """
-    A more refined PER approach:
-      - Each episode has a priority
-      - We store an array of priorities
-      - We sample episodes according to p_i^alpha
-      - Weighted IS correction factor for the sampled data
-    """
-    def __init__(self, max_size=100000, seq_len=50, alpha=0.6, beta=0.4):
-        self.max_size = int(max_size)
-        self.seq_len = seq_len
-        self.alpha = alpha
-        self.beta = beta
-        self.episodes = []
-        self.priorities = []
-        self.cur_episode = []
-        self.cur_priority = 0.0
-        self.size = 0
-        self.eps = 1e-6
-
-    def add_transition(self, transition, priority=None):
-        """
-        transition = {obs, action, reward, next_obs, done}
-        priority is optional
-        """
-        p = priority if priority is not None else 1.0
-        self.cur_priority = max(self.cur_priority, p)
-        self.cur_episode.append(transition)
-        self.size += 1
-        if transition["done"]:
-            # finalize the episode
-            self.episodes.append(self.cur_episode)
-            self.priorities.append(self.cur_priority)
-            self.cur_episode = []
-            self.cur_priority = 0.0
-            # evict oldest if memory is full
-            while self.size > self.max_size and self.episodes:
-                oldest = self.episodes.pop(0)
-                oldest_p = self.priorities.pop(0)
-                self.size -= len(oldest)
-
-    def __len__(self):
-        return len(self.episodes)
-
-    def _sample_episode_index(self):
-        if not self.episodes:
-            return None, None
-        ps = np.array(self.priorities, dtype=np.float32)
-        ps_alpha = (ps + self.eps) ** self.alpha
-        total = ps_alpha.sum()
-        probs = ps_alpha / total
-        idx = np.random.choice(len(self.episodes), p=probs)
-        # Weighted importance-sampling factor
-        # w_i = (1/(N*P(i)))^beta
-        N = len(self.episodes)
-        weight = (1.0 / (N*probs[idx]))**self.beta
-        return idx, weight
-
-    def sample_subsequence(self):
-        """
-        Sample a random subsequence from one randomly-chosen episode with PER weighting
-        Returns: seq, weight
-        """
-        if not self.episodes:
-            return None, None
-        idx, w = self._sample_episode_index()
-        if idx is None:
-            return None, None
-        ep = self.episodes[idx]
-        L = len(ep)
-        if L < self.seq_len:
-            pad_len = self.seq_len - L
-            seq = ep + [ep[-1]]*pad_len
-        else:
-            start_idx = np.random.randint(0, L - self.seq_len +1)
-            seq = ep[start_idx:start_idx+self.seq_len]
-        return seq, w
-
+# ---------------------------------------------------------
+# 4) Replay + PrioritizedSequenceDataset
+# ---------------------------------------------------------
 class PrioritizedSequenceDataset(Dataset):
-    def __init__(self, replay_memory: PrioritizedSequenceMemory):
+    """
+    Dataset für Sequenz-Sampling aus dem Replay Buffer mit Priorisierung (PER).
+    """
+    def __init__(self, replay_memory, obs_dim, act_dim):
+        super().__init__()
         self.replay_memory = replay_memory
-        self.seq_len = replay_memory.seq_len
+        self.max_seq_len = replay_memory.length
+        self.obs_dim = obs_dim
+        self.act_dim = act_dim
 
     def __len__(self):
         return max(1, len(self.replay_memory))
 
     def __getitem__(self, idx):
-        seq, weight = self.replay_memory.sample_subsequence()
+        seq, weight = None, None
+        # Versuche mehrfach, eine gültige Sequenz zu sampeln
+        for _ in range(10):
+            seq, weight = self.replay_memory.sample_subsequence(
+                max_seq_len=self.max_seq_len
+            )
+            if seq is not None:
+                break
+        # Fallback, falls gar keine Sequenz
         if seq is None:
-            return None
+            dummy_obs = np.zeros((self.max_seq_len, self.obs_dim), dtype=np.float32)
+            dummy_act = np.zeros((self.max_seq_len, self.act_dim), dtype=np.float32)
+            dummy_rew = np.zeros((self.max_seq_len,), dtype=np.float32)
+            dummy_done = np.ones((self.max_seq_len,), dtype=np.float32)
+            dummy_weight = np.array(1.0, dtype=np.float32)
+            batch_dict = {
+                "obs": dummy_obs,
+                "action": dummy_act,
+                "reward": dummy_rew,
+                "done": dummy_done,
+                "IS_weight": dummy_weight,
+            }
+            print("[DEBUG] Returning dummy batch (no valid sequence found).")
+            return batch_dict
+
+        # Baue den Batch-Dict
         batch_dict = {}
         keys = seq[0].keys()
         for k in keys:
-            batch_dict[k] = np.array([step[k] for step in seq], dtype=np.float32)
-        # we also store 'weight' for WeightedIS in the training step
-        batch_dict['IS_weight'] = np.array(weight, dtype=np.float32)
+            try:
+                batch_dict[k] = np.array([step[k] for step in seq], dtype=np.float32)
+            except Exception as e:
+                print(f"[DEBUG] Error converting key {k}: {e}")
+                batch_dict[k] = [step[k] for step in seq]
+        batch_dict["IS_weight"] = np.array(weight, dtype=np.float32)
         return batch_dict
 
-# --------------------------------------------------------------------------------
-# 3) Basic MLP
-# --------------------------------------------------------------------------------
-class Feedforward(nn.Module):
-    def __init__(self, input_size, hidden_sizes, output_size, activation_fun=nn.ReLU(), output_activation=None):
-        super().__init__()
-        layers = []
-        in_dim = input_size
-        for hs in hidden_sizes:
-            layers.append(nn.Linear(in_dim, hs))
-            layers.append(activation_fun)
-            in_dim = hs
-        layers.append(nn.Linear(in_dim, output_size))
-        if output_activation is not None:
-            layers.append(output_activation)
-        self.net = nn.Sequential(*layers)
-
-    def forward(self, x):
-        return self.net(x)
-
-# --------------------------------------------------------------------------------
-# 4) Multi-layer RSSM + slow target
-# --------------------------------------------------------------------------------
-class RSSM(nn.Module):
+# ---------------------------------------------------------
+# 5) Hilfsfunktionen: count_steps, make_dataset, make_env
+#    Falls du sie brauchst, kannst du sie hier definieren
+# ---------------------------------------------------------
+def count_steps(folder):
     """
-    A 2-layer GRU-based stochastic recurrent model
+    Beispiel: Zählt .npz-Dateien in 'folder' und extrahiert Steps,
+    falls du Episode-Files speicherst.
     """
-    def __init__(self, obs_dim, act_dim, deter_dim=64, stoch_dim=32):
-        super().__init__()
-        self.obs_dim = obs_dim
-        self.act_dim = act_dim
-        self.deter_dim = deter_dim
-        self.stoch_dim = stoch_dim
+    return sum(int(str(n).split("-")[-1][:-4]) - 1 for n in folder.glob("*.npz"))
 
-        self.rnn1 = nn.GRUCell(stoch_dim + act_dim, deter_dim)
-        self.rnn2 = nn.GRUCell(deter_dim, deter_dim)
-
-        self.prior_net = Feedforward(deter_dim*2, [64], 2*stoch_dim)
-        self.post_net  = Feedforward(deter_dim*2 + obs_dim, [64], 2*stoch_dim)
-
-        self.init_d1 = nn.Parameter(torch.zeros(deter_dim))
-        self.init_d2 = nn.Parameter(torch.zeros(deter_dim))
-        self.init_st = nn.Parameter(torch.zeros(stoch_dim))
-
-    def init_state(self, batch_size):
-        d1 = self.init_d1.unsqueeze(0).expand(batch_size, -1)
-        d2 = self.init_d2.unsqueeze(0).expand(batch_size, -1)
-        st = self.init_st.unsqueeze(0).expand(batch_size, -1)
-        return (d1, d2, st)
-
-    def forward(self, prev_state, action, obs):
-        (d1, d2, st) = prev_state
-        x1 = torch.cat([st, action], dim=-1)
-        d1_next = self.rnn1(x1, d1)
-        d2_next = self.rnn2(d1_next, d2)
-        catd = torch.cat([d1_next, d2_next], dim=-1)
-
-        prior_stats = self.prior_net(catd)
-        pm, plv = torch.chunk(prior_stats, 2, dim=-1)
-
-        post_inp = torch.cat([catd, obs], dim=-1)
-        post_stats= self.post_net(post_inp)
-        mm, mlv = torch.chunk(post_stats, 2, dim=-1)
-
-        # sample
-        st_next = mm + torch.exp(0.5*mlv)*torch.randn_like(mm)
-        nxt = (d1_next, d2_next, st_next)
-        stats = (pm, plv, mm, mlv)
-        return nxt, stats
-
-    def kl_loss(self, prior_stats, post_stats):
-        """
-        prior_stats = (pm, plv), post_stats = (mm, mlv)
-        kl( post || prior )
-        """
-        pm, plv = prior_stats
-        mm, mlv = post_stats
-        kl = 0.5 * (
-            plv - mlv
-            + (torch.exp(mlv) + (mm - pm)**2)/torch.exp(plv)
-            - 1.0
-        )
-        return kl.sum(dim=-1)
-
-def soft_update_rssm(source: RSSM, target: RSSM, tau=0.01):
+def make_dataset(episodes, config):
     """
-    Soft-update from source to target with factor tau
+    Falls du Episoden in Memory hast und daraus
+    ein Batch-Dataset bauen willst.
     """
-    for sp, tp in zip(source.parameters(), target.parameters()):
-        tp.data.copy_(tau * sp.data + (1.0 - tau) * tp.data)
+    raise NotImplementedError("Implementiere, wenn du offline/online Daten hast.")
 
-class SlowRSSM(nn.Module):
+def make_env(config, mode, idx):
     """
-    Contains an RSSM inside, so we can do load_state_dict or partial updates
-    from a main RSSM.
+    Erstelle deine Umgebung.
+    Diese Funktion ist ein Minimalstub:
     """
-    def __init__(self, obs_dim, act_dim, deter_dim=64, stoch_dim=32):
-        super().__init__()
-        self.rssm = RSSM(obs_dim, act_dim, deter_dim, stoch_dim)
+    raise NotImplementedError("Bitte implementiere, falls du parallele Envs erstellst.")
 
-    def load_from_rssm(self, world_model):
-        """
-        Load parameters from the main world_model.rssm into this slow rssm.
-        """
-        self.rssm.load_state_dict(world_model.rssm.state_dict())
-
-    def forward(self, *args, **kwargs):
-        return self.rssm(*args, **kwargs)
-
-    def init_state(self, *args, **kwargs):
-        return self.rssm.init_state(*args, **kwargs)
-
-    def kl_loss(self, *args, **kwargs):
-        return self.rssm.kl_loss(*args, **kwargs)
-
-
-# --------------------------------------------------------------------------------
-# 5) ImageDecoder (placeholder) for reconstruction/SSIM
-# --------------------------------------------------------------------------------
-class ImageDecoder(nn.Module):
-    """
-    A placeholder image decoder.
-    This would reconstruct an observation (e.g. a 64x64 RGB image) from the latent state.
-    Here we only place a MLP stub. You would adapt it to a transposed CNN or similar for real images.
-    """
-    def __init__(self, latent_dim=128, image_shape=(3,64,64)):
-        super().__init__()
-        self.latent_dim = latent_dim
-        self.image_shape = image_shape
-        # Minimal MLP
-        out_dim = int(np.prod(image_shape))
-        self.decoder = Feedforward(latent_dim, [256,256], out_dim)
-
-    def forward(self, latent):
-        """
-        latent shape: [B, latent_dim]
-        returns: reconstructed images, shape = [B, *image_shape]
-        """
-        x = self.decoder(latent)
-        x = torch.sigmoid(x)  # in [0,1]
-        x = x.view(x.shape[0], *self.image_shape)
-        return x
-
-
-class VectorDecoder(nn.Module):
-    """
-    A simple decoder that reconstructs a vector observation.
-    Use this if your environment observation is a flat vector (e.g. 18D in HockeyEnv).
-    """
-
-    def __init__(self, latent_dim=128, obs_shape=(18,)):
-        super().__init__()
-        self.latent_dim = latent_dim
-        self.obs_shape = obs_shape
-        out_dim = int(np.prod(obs_shape))
-        # Example: two hidden layers of size 256 each
-        self.decoder = nn.Sequential(
-            nn.Linear(latent_dim, 256),
-            nn.ReLU(),
-            nn.Linear(256, 256),
-            nn.ReLU(),
-            nn.Linear(256, out_dim)
-        )
-
-    def forward(self, latent):
-        """
-        latent: [B, latent_dim] => returns [B, *obs_shape]
-        """
-        x = self.decoder(latent)
-        x = x.view(x.shape[0], *self.obs_shape)  # e.g. [B, 18]
-        return x
-
-# --------------------------------------------------------------------------------
-# 6) WorldModel with ICM + reward/done + optional ImageDecoder
-# --------------------------------------------------------------------------------
-class RSSMWorldModel(nn.Module):
-    """
-    RSSM + forward model (ICM) + reward/done + optional Decoder (VectorDecoder oder ImageDecoder).
-    """
-
-    def __init__(self, obs_dim, act_dim, deter_dim=64, stoch_dim=32, use_decoder=False,
-                 decoder_obs_shape=None, is_image_obs=False):
-        """
-        Args:
-          obs_dim: dimension of the environment observation (e.g. 18 for HockeyEnv).
-          act_dim: dimension of the action (e.g. 4 if continuous).
-          deter_dim, stoch_dim: RSSM dimensions.
-          use_decoder: whether to enable reconstruction
-          decoder_obs_shape: shape of the observation for reconstruction
-              if is_image_obs=True, might be (3,64,64),
-              otherwise for vector env, something like (18,)
-          is_image_obs: set True if your environment returns images, so we use an ImageDecoder.
-        """
-        super().__init__()
-
-        self.rssm = RSSM(obs_dim, act_dim, deter_dim, stoch_dim)
-        in_dim = (2 * deter_dim + stoch_dim + act_dim)
-
-        self.reward_head = Feedforward(in_dim, [64], 1)
-        self.done_head = Feedforward(in_dim, [64], 1)
-        self.forward_model = Feedforward(in_dim, [64], stoch_dim)
-
-        self.use_decoder = use_decoder
-        self.decoder = None
-
-        if self.use_decoder:
-            if decoder_obs_shape is None:
-                # fallback => assume vector env of length obs_dim
-                decoder_obs_shape = (obs_dim,)
-
-            if is_image_obs:
-                # If you actually had image data (3x64x64) => use the old ImageDecoder
-                dec_in_dim = 2 * deter_dim + stoch_dim
-                self.decoder = ImageDecoder(latent_dim=dec_in_dim, image_shape=decoder_obs_shape)
-            else:
-                # For a vector env like Hockey: use VectorDecoder
-                dec_in_dim = 2 * deter_dim + stoch_dim
-                self.decoder = VectorDecoder(latent_dim=dec_in_dim, obs_shape=decoder_obs_shape)
-
-    def init_state(self, batch_size):
-        return self.rssm.init_state(batch_size)
-
-    def forward(self, prev_state, action, obs):
-        """
-        RSSM forward pass:
-         next_state, stats = rssm(...)
-         r_pred, done_pred, st_pred
-        """
-        next_state, stats = self.rssm(prev_state, action, obs)
-        d1, d2, st = next_state
-        feat = torch.cat([d1, d2, st, action], dim=-1)
-
-        r_pred = self.reward_head(feat)
-        done_logit = self.done_head(feat)
-        stoch_pred = self.forward_model(feat)
-        return next_state, stats, r_pred, done_logit, stoch_pred
-
-    def decode(self, d1, d2, st):
-        """
-        If we use a decoder, reconstruct either a vector or an image.
-        """
-        if not self.use_decoder or (self.decoder is None):
-            return None
-        latent = torch.cat([d1, d2, st], dim=-1)  # shape [B, 2*deter_dim + stoch_dim]
-        recon = self.decoder(latent)  # shape [B, obs_dim] or [B, 3,64,64], etc.
-        return recon
-
-
-# --------------------------------------------------------------------------------
-# 7) Plan2Explore ensemble
-# --------------------------------------------------------------------------------
-class Plan2ExploreModel(nn.Module):
-    """
-    K deterministic networks => measure disagreement => intrinsic
-    """
-    def __init__(self, in_dim, out_dim, ensemble_size=5, hidden_size=64):
-        super().__init__()
-        self.ensemble = nn.ModuleList([
-            Feedforward(in_dim, [hidden_size], out_dim) for _ in range(ensemble_size)
-        ])
-        self.K = ensemble_size
-
-    def forward(self, x):
-        preds = []
-        for net in self.ensemble:
-            preds.append(net(x))
-        return preds
-
-    @torch.no_grad()
-    def disagreement(self, x):
-        preds = self.forward(x)
-        stack = torch.stack(preds, dim=0) # [K,B,out_dim]
-        var = torch.var(stack, dim=0, unbiased=False) # [B, out_dim]
-        return var.mean(dim=-1, keepdim=True) # [B,1]
-
-# --------------------------------------------------------------------------------
-# 8) Actor & Critic
-# --------------------------------------------------------------------------------
-class Actor(nn.Module):
-    def __init__(self, latent_dim, action_space, hidden_size=64):
-        super().__init__()
-        self.latent_dim = latent_dim
-        self.is_discrete = isinstance(action_space, spaces.Discrete)
-        if self.is_discrete:
-            self.act_dim = action_space.n
-            self.net = Feedforward(latent_dim, [hidden_size, hidden_size], self.act_dim)
-        else:
-            self.act_dim = action_space.shape[0]
-            self.net = Feedforward(latent_dim, [hidden_size, hidden_size],
-                                   self.act_dim, output_activation=nn.Tanh())
-
-    def forward(self, latent, sample=True):
-        out = self.net(latent)
-        if self.is_discrete:
-            dist = torch.distributions.Categorical(logits=out)
-            act = dist.sample() if sample else torch.argmax(out, dim=-1)
-            return act, dist
-        else:
-            dist = None
-            act = out # in [-1,1]
-            return act, dist
-
-class Critic(nn.Module):
-    def __init__(self, latent_dim, hidden_size=64):
-        super().__init__()
-        self.net = Feedforward(latent_dim, [hidden_size, hidden_size], 1)
-    def forward(self, latent):
-        return self.net(latent).squeeze(-1)
-
-# --------------------------------------------------------------------------------
-# 9) The DreamerV3Agent with:
-#    - SlowTarget RSSM
-#    - PER
-#    - alpha_ext, alpha_int
-#    - lambda_return with a running mean std on returns
-#    - AGC-optimized training + Cosine LR
-#    - RNN tracking in act()
-#    - Optional image reconstruction metrics stubs
-#    - evaluate_latents() example
-# --------------------------------------------------------------------------------
-
-def soft_update_params(source: nn.Module, target: nn.Module, tau=0.01):
-    for sp, tp in zip(source.parameters(), target.parameters()):
-        tp.data.copy_(tau*sp.data + (1.0 - tau)*tp.data)
-
+# ---------------------------------------------------------
+# 6) Agent-Klasse DreamerV3Agent
+# ---------------------------------------------------------
 class DreamerV3Agent:
+    """
+    Dreamer-ähnlicher Agent, der WorldModel + ImagBehavior + Explorationsmodule nutzt.
+    """
     def __init__(self, observation_space, action_space, **config):
         defaults = {
-            "deter_dim": 64, "stoch_dim": 32,
-            "wm_lr": 1e-3, "actor_lr":1e-4, "critic_lr":1e-4,
-            "alpha_lr_ext":1e-4, "alpha_lr_int":1e-4,
-            "discount": 0.99, "lambda_": 0.95,
-            "buffer_size":1e5, "seq_len":50, "batch_size":8,
-            "max_train_steps":1e6, "actor_horizon":5,
-            "icm_scale": 0.2, "plan2explore_size":5, "plan2explore_scale":1.0,
-            "target_kl":1.0, "trust_region_scale":0.05,
-            "tau_rssm":0.01,   # soft-update rate for slow target
+            "model_lr": 1e-3,
+            "batch_size": 16,
+            "seq_len": 50,
+            "buffer_size": 1e5,
             "use_per": True,
-            "per_alpha": 0.6,
-            "per_beta": 0.4,
-            "agc_clip": 0.05,  # AGC factor
-            "use_decoder": False,  # if we want to reconstruct images
+            "agc_clip": 0.05,
+            "discount": 0.99,
+            "lambda_": 0.95,
+            "max_train_steps": 1e6,
+            "expl_behavior": "random",  # "greedy", "random", "plan2explore"
+            "expl_until": 1e5,
         }
         defaults.update(config)
         self.cfg = defaults
+        self.device = device
 
+        # Falls du numerische Strings im config hast -> konvertiere
+        def convert_numeric_values(d):
+            if isinstance(d, dict):
+                return {k: convert_numeric_values(v) for k, v in d.items()}
+            elif isinstance(d, list):
+                return [convert_numeric_values(item) for item in d]
+            elif isinstance(d, str):
+                try:
+                    return int(d)
+                except ValueError:
+                    try:
+                        return float(d)
+                    except ValueError:
+                        return d
+            else:
+                return d
+        self.cfg = convert_numeric_values(self.cfg)
+
+
+        # Check Obs
         if not isinstance(observation_space, spaces.Box):
-            raise UnsupportedSpace("Obs must be Box")
-
+            raise UnsupportedSpace("DreamerV3Agent requires a Box observation space.")
         self.obs_dim = observation_space.shape[0]
         self.action_space = action_space
-        if isinstance(action_space, spaces.Box):
-            self.is_discrete = False
-            self.act_dim = action_space.shape[0]
-        else:
+
+        # Check Action
+        if isinstance(action_space, spaces.Discrete):
             self.is_discrete = True
             self.act_dim = action_space.n
+        else:
+            self.is_discrete = False
+            self.act_dim = action_space.shape[0]
 
-        # 1) World Model + slow
-        self.world_model = RSSMWorldModel(
-            obs_dim=self.obs_dim,
-            act_dim=self.act_dim,
-            deter_dim=self.cfg["deter_dim"],
-            stoch_dim=self.cfg["stoch_dim"],
-            use_decoder=self.cfg["use_decoder"]
-        ).to(device)
-        self.slow_rssm = SlowRSSM(
-            self.obs_dim, self.act_dim,
-            self.cfg["deter_dim"], self.cfg["stoch_dim"]
-        ).to(device)
-        # load
-        self.slow_rssm.rssm.load_state_dict(self.world_model.rssm.state_dict())
+        # Füge num_actions hinzu
+        if "num_actions" not in self.cfg:
+            self.cfg["num_actions"] = self.act_dim
 
-        # 2) Plan2Explore
-        in_dim = (2*self.cfg["deter_dim"] + self.cfg["stoch_dim"] + self.act_dim)
-        out_dim= self.cfg["stoch_dim"]
-        self.plan2explore = Plan2ExploreModel(in_dim, out_dim, self.cfg["plan2explore_size"]).to(device)
+        # 1) Erzeuge World Model
+        self.world_model = WorldModel(
+            obs_space=observation_space,
+            act_space=action_space,
+            step=0,
+            config=self.cfg
+        ).to(self.device)
 
-        # 3) Actor/Critic
-        latent_dim = (2*self.cfg["deter_dim"] + self.cfg["stoch_dim"])
-        self.actor = Actor(latent_dim, self.action_space).to(device)
-        self.critic= Critic(latent_dim).to(device)
+        # 2) ImagBehavior
+        self.imag_behavior = ImagBehavior(self.cfg, self.world_model).to(self.device)
 
-        # 4) alpha_ext / alpha_int
-        self.log_alpha_ext = nn.Parameter(torch.zeros([]))
-        self.log_alpha_int = nn.Parameter(torch.zeros([]))
-        self.opt_alpha_ext = torch.optim.Adam([self.log_alpha_ext], lr=self.cfg["alpha_lr_ext"])
-        self.opt_alpha_int = torch.optim.Adam([self.log_alpha_int], lr=self.cfg["alpha_lr_int"])
+        # PyTorch 2.0 compile
+        if USE_TORCH_COMPILE and hasattr(torch, "compile"):
+            self.world_model = torch.compile(self.world_model)
+            self.imag_behavior = torch.compile(self.imag_behavior)
 
-        # 5) Build optimizers with AGC -> normal Adam + AGC after .backward()
-        from torch.optim.lr_scheduler import CosineAnnealingLR
-        self.wm_params = list(self.world_model.parameters())
-        self.ens_params= list(self.plan2explore.parameters())
-        self.actor_params = list(self.actor.parameters())
-        self.critic_params= list(self.critic.parameters())
+        # 3) Explorationsverhalten
+        def reward_fn(feat, state, act):
+            return self.world_model.heads["reward"](feat).mean()
 
-        self.wm_opt = torch.optim.Adam(self.wm_params, lr=self.cfg["wm_lr"])
-        self.ens_opt= torch.optim.Adam(self.ens_params,self.cfg["wm_lr"])
-        self.actor_opt=torch.optim.Adam(self.actor_params,lr=self.cfg["actor_lr"])
-        self.critic_opt=torch.optim.Adam(self.critic_params,lr=self.cfg["critic_lr"])
+        expl_map = {
+            "greedy": lambda: self.imag_behavior,
+            "random": lambda: Random(self.cfg, action_space),
+            "plan2explore": lambda: Plan2Explore(self.cfg, self.world_model, reward_fn),
+        }
+        self._expl_behavior = expl_map[self.cfg["expl_behavior"]]()
+        self._expl_behavior.to(self.device)
 
-        self.wm_sched = CosineAnnealingLR(self.wm_opt, self.cfg["max_train_steps"], eta_min=1e-5)
-        self.ens_sched= CosineAnnealingLR(self.ens_opt,self.cfg["max_train_steps"], eta_min=1e-5)
-        self.actor_sched= CosineAnnealingLR(self.actor_opt,self.cfg["max_train_steps"], eta_min=1e-5)
-        self.critic_sched=CosineAnnealingLR(self.critic_opt,self.cfg["max_train_steps"],eta_min=1e-5)
-
-        # 6) Replay
+        # 4) Replay Buffer
         if self.cfg["use_per"]:
-            self.buffer = PrioritizedSequenceMemory(
-                max_size=int(self.cfg["buffer_size"]),
-                seq_len=int(self.cfg["seq_len"]),
-                alpha=self.cfg["per_alpha"],
-                beta=self.cfg["per_beta"]
+            self.buffer = Replay(
+                length=int(self.cfg["seq_len"]),
+                capacity=int(self.cfg["buffer_size"]),
+                directory=self.cfg.get("replay_dir", None),
+                chunksize=1024,
+                online=False,
+                use_priority=True,
+                seed=self.cfg.get("seed", 42)
             )
-            self.dataset= PrioritizedSequenceDataset(self.buffer)
+            self.dataset = PrioritizedSequenceDataset(self.buffer, self.obs_dim, self.act_dim)
         else:
-            raise NotImplementedError("Non-PER buffer not implemented in this example.")
-        self.dataloader = DataLoader(self.dataset,batch_size=int(self.cfg["batch_size"]),
-                                     shuffle=True, drop_last=True)
+            raise NotImplementedError("Only PER is implemented for now.")
 
-        # 7) Reward RMS & Return RMS for Critic normalizing
-        self.reward_rms = RunningMeanStd(shape=())
-        self.return_rms = RunningMeanStd(shape=()) # Value normalization
+        # DataLoader
+        from torch.utils.data import DataLoader
+        def custom_collate_fn(batch):
+            collated = {}
+            keys = batch[0].keys()
+            for key in keys:
+                if key == "IS_weight":
+                    collated[key] = torch.stack([torch.tensor(sample[key]) for sample in batch])
+                else:
+                    max_len = max(sample[key].shape[0] for sample in batch)
+                    padded_tensors = []
+                    for sample in batch:
+                        tensor = torch.tensor(sample[key])
+                        pad_size = max_len - tensor.shape[0]
+                        if pad_size > 0:
+                            pad = (0, 0) * (tensor.dim() - 1) + (0, pad_size)
+                            tensor = F.pad(tensor, pad, "constant", 0)
+                        padded_tensors.append(tensor)
+                    collated[key] = torch.stack(padded_tensors)
+            return collated
 
+        self.dataloader = DataLoader(
+            self.dataset,
+            batch_size=int(self.cfg["batch_size"]),
+            shuffle=True,
+            drop_last=True,
+            num_workers=4,
+            pin_memory=True,
+            persistent_workers=True,
+            collate_fn=custom_collate_fn
+        )
+
+        # 5) Stats
+        self.global_step = 0
         self.discount = self.cfg["discount"]
-        self.lambda_  = self.cfg["lambda_"]
-        self.global_step=0
+        self.lambda_ = self.cfg["lambda_"]
+        self.reward_rms = RunningMeanStd(epsilon=1e-5, shape=())
+        self.return_rms = RunningMeanStd(epsilon=1e-5, shape=())
 
-        # Action scaling if continuous
-        if not self.is_discrete:
-            high = torch.tensor(self.action_space.high, dtype=torch.float32, device=device)
-            low  = torch.tensor(self.action_space.low,  dtype=torch.float32, device=device)
-            self.action_scale = (high - low)/2.
-            self.action_bias  = (high + low)/2.
-        else:
-            self.action_scale = None
-            self.action_bias  = None
-
-        # RNN Inference State for 'act()'
+        self.last_action = None
         self.inference_state = None
 
-    @property
-    def alpha_ext(self):
-        return torch.exp(self.log_alpha_ext)
-    @property
-    def alpha_int(self):
-        return torch.exp(self.log_alpha_int)
-
     def reset_inference_state(self, batch_size=1):
-        """
-        Clears or resets the internal RNN state used by act().
-        """
-        self.inference_state = self.world_model.rssm.init_state(batch_size)
+        # Falls du z. B. das RNN oder RSSM manuell zurücksetzen willst.
+        pass
 
     def reset(self):
         """
-        Resets any internal inference state if needed.
-        Currently, we just reset_inference_state() so that
-        our act() method starts from a fresh RSSM state.
+        Wird z. B. vom Trainer aufgerufen, um den Agenten am Episode-Beginn zurückzusetzen.
         """
         self.reset_inference_state()
+        self.last_action = None
+        self.inference_state = None
 
-    @torch.no_grad()
     def act(self, obs, sample=True):
         """
-        Now we track an internal RNN state for inference.
-        This is crucial if you want consistent latents across steps
-        for e.g. latent video or reconstructions.
+        Aktion basierend auf explorativem oder greedy Verhalten wählen.
+        Nutzt das World Model und pflegt einen latenten Zustand (self.inference_state).
         """
+        # 1) Falls kein interner Zustand vorhanden ist, initialisieren
         if self.inference_state is None:
-            self.reset_inference_state(batch_size=1)
+            # self.inference_state kann z. B. von self.world_model.dynamics.initial(...) kommen
+            batch_size = 1
+            self.inference_state = self.world_model.dynamics.initial_state(batch_size)
 
-        obs_t = torch.tensor(obs, dtype=torch.float32, device=device).unsqueeze(0)
-        # One step of RSSM with previous state
-        next_st, stats = self.world_model.rssm(self.inference_state,
-                                               # action is unknown?
-                                               # We pass dummy zeros if we want pure prior or do something
-                                               torch.zeros((1, self.action_space.shape[0]), device=device)
-                                                if not self.is_discrete else
-                                                torch.zeros((1, self.act_dim), device=device),
-                                               obs_t)
-        self.inference_state = next_st
-        # If you prefer, you can do a 'prior only' or a 'posterior' with the observation.
-        # For a real environment, you'd typically do a posterior update with obs.
+            self.last_action = torch.zeros((batch_size, self.act_dim), device=self.device)
 
-        # Then actor picks action from the new latents
-        (d1, d2, st) = next_st
-        latent = torch.cat([d1, d2, st], dim=-1)
-        action, dist = self.actor(latent, sample=sample)
+        # 2) Observation in passendes Format
+        obs_t = torch.tensor(obs, device=self.device, dtype=torch.float32).unsqueeze(0)
+        # Erzeuge ein dict so wie im Training
+        # "is_first": [0], "is_terminal": [0], "reward": optional ...
+        data_dict = {
+            "obs": obs_t,  # shape (1, obs_dim)
+            "is_first": torch.zeros((1,), device=self.device),
+            "is_terminal": torch.zeros((1,), device=self.device),
+            # Falls du 'action' fürs pipeline brauchst => evtl. self.last_action
+            # "action": self.last_action,
+        }
+
+        # 3) Preprocess
+        data_dict = self.world_model.preprocess(data_dict)  # normalisiert Keys usw.
+        data_dict["is_first"] = (data_dict["is_first"] > 0.5)
+
+        # 4) Encoding
+        embed = self.world_model.encoder(data_dict["obs"])  # shape (1, embed_dim)
+
+        # 5) RSSM obs_step
+        # Du musst hier den latenten Zustand 'self.inference_state' und die letzte Aktion übergeben,
+        # falls du das in Dreamer so verwendest (z. B. "prev_state, prev_action, embed, is_first").
+        # Minimal:
+        prev_state = self.inference_state  # vorher war prev_latent, aber hier verwenden wir prev_state
+        prev_action = (
+            torch.zeros((1, self.act_dim), device=self.device)
+            if self.last_action is None
+            else self.last_action
+        )
+
+        prior_state = self.world_model.dynamics.prior_step(prev_state, prev_action, sample=False)
+        latent = self.world_model.dynamics.post_step(prior_state, embed, sample=False)
+        feat = self.world_model.dynamics.get_feat(latent)
+
+        # 7) Actor (exploration oder greedy)
+        actor = self._expl_behavior.actor(feat)
+        action = actor.sample() if sample else actor.mode()
+
+        # 8) Speichere latenten Zustand & Aktion
+        self.inference_state = latent
+        self.last_action = action
+
+        # 9) Gib Aktion zurück
         if not self.is_discrete:
-            action = action*self.action_scale + self.action_bias
-        return action.cpu().numpy()[0]
+            return action.squeeze(0).detach().cpu().numpy()
+
+        else:
+            return action.argmax(dim=-1).item()
 
     def store_transition(self, transition):
         """
-        We can store a disagreement-based priority if we want:
-        For now, we pass priority=1.0.
+        Speichert eine einzelne Transition in den Replay Buffer.
         """
-        prio = 1.0
-        self.buffer.add_transition(transition, priority=prio)
+        # Optionale Priorität
+        priority = 1.0
+        self.buffer.add(transition, worker=0)
+        # Update Reward RMS
         self.reward_rms.update(np.array([transition["reward"]], dtype=np.float32))
 
     def train(self, num_updates=1):
-        logs=[]
-        loader_iter= iter(self.dataloader)
+        """
+        Führt num_updates Trainings-Iterationen aus (WorldModel + ImagBehavior + Exploration).
+        """
+        logs = []
+        loader_iter = iter(self.dataloader)
         for _ in range(num_updates):
             try:
-                batch= next(loader_iter)
+                batch = next(loader_iter)
             except StopIteration:
-                loader_iter= iter(self.dataloader)
+                loader_iter = iter(self.dataloader)
                 try:
-                    batch= next(loader_iter)
+                    batch = next(loader_iter)
                 except StopIteration:
                     break
             if batch is None:
                 break
 
-            obs     = batch["obs"].to(device)
-            actions = batch["action"].to(device)
-            rewards = batch["reward"].to(device)
-            dones   = batch["done"].to(device)
-            IS_w    = batch["IS_weight"].to(device) # Weighted IS from PER
-            B, T= obs.shape[0], obs.shape[1]
+            # (B,T,...) => world_model._train() erfordert: "obs", "action", "reward", "is_first", "is_terminal" etc.
+            data_dict = {
+                "obs": batch["obs"].to(self.device),
+                "action": batch["action"].to(self.device),
+                "reward": batch["reward"].to(self.device),
+                "is_terminal": batch["done"].to(self.device),
+                "is_first": torch.zeros_like(batch["done"], device=self.device),
+            }
+            # 1) World Model Update
+            post, wm_metrics = self.world_model._train(data_dict)
+            print( wm_metrics["dyn_loss"])
+            # 2) ImagBehavior
+            def objective(feat, state, act):
+                return self.world_model.heads["reward"](feat).mean
 
-            # 1) reward normalization
-            rew_mean= torch.tensor(self.reward_rms.mean,dtype=torch.float32,device=device)
-            rew_std= torch.tensor(self.reward_rms.std, dtype=torch.float32,device=device)
-            normed_rewards= (rewards - rew_mean)/(rew_std+1e-8)
+            post_feat, post_state, post_action, weights, ib_metrics = self.imag_behavior._train(
+                post, objective
+            )
 
-            # ----------------------------------------------------------------
-            # WORLD MODEL update (RSSM + ICM)
-            # ----------------------------------------------------------------
-            self.wm_opt.zero_grad()
-            wm_loss_val=0.0
-            state= self.world_model.init_state(B)
-            for t in range(T):
-                a_t= actions[:, t, :]
-                o_t= obs[:, t, :]
-                next_st, stats, r_pred, done_logit, st_pred= self.world_model(state, a_t, o_t)
-                pm,plv, mm,mlv= stats
-                klv= self.world_model.rssm.kl_loss((pm,plv), (mm,mlv)).mean()
-                r_loss= F.mse_loss(r_pred, normed_rewards[:, t:t+1])
-                d_loss= F.binary_cross_entropy_with_logits(done_logit, dones[:, t:t+1])
-                st_next= next_st[2].detach()
-                icm_err= F.mse_loss(st_pred, st_next)
-                step_loss= klv + r_loss + d_loss + self.cfg["icm_scale"]*icm_err
-                # Weighted IS
-                step_loss= (step_loss*IS_w).mean()
-                step_loss.backward(retain_graph=(t<T-1))
-                wm_loss_val+= step_loss.item()
-                state= next_st
-            # AGC
-            adaptive_gradient_clipping(self.wm_params, clip_factor=self.cfg["agc_clip"])
-            self.wm_opt.step()
-            # slow update
-            soft_update_rssm(self.world_model.rssm, self.slow_rssm.rssm, tau=self.cfg["tau_rssm"])
 
-            # ----------------------------------------------------------------
-            # Plan2Explore => ensemble
-            # ----------------------------------------------------------------
-            self.ens_opt.zero_grad()
-            ens_loss_val=0.0
-            stt= self.world_model.init_state(B)
-            for t in range(T):
-                a_t= actions[:, t, :]
-                o_t= obs[:, t, :]
-                nxt, stt_stats= self.world_model.rssm(stt, a_t, o_t)
-                st_next= nxt[2].detach()
-                feat_c= torch.cat([nxt[0], nxt[1], st_next, a_t], dim=-1)
-                preds= self.plan2explore(feat_c)
-                e_loss= 0.0
-                for outp in preds:
-                    e_loss+= F.mse_loss(outp, st_next)
-                e_loss= (e_loss*IS_w).mean() # Weighted
-                e_loss.backward(retain_graph=(t<T-1))
-                ens_loss_val+= e_loss.item()
-                stt= nxt
-            adaptive_gradient_clipping(self.ens_params, clip_factor=self.cfg["agc_clip"])
-            self.ens_opt.step()
+            # 3) Exploration
+            if self.cfg["expl_behavior"] != "greedy":
+                context = {"feat": self.world_model.dynamics.get_feat(post)}  # z. B. Feats
+                ret_expl = self._expl_behavior.train(post, context, data_dict)
+                if ret_expl is not None:
+                    _, mets_expl = ret_expl
+                    logs.append({f"expl_{k}": v for k, v in mets_expl.items()})
 
-            # ----------------------------------------------------------------
-            # Critic => lambda-return with return normalization
-            # ----------------------------------------------------------------
-            with torch.no_grad():
-                lat_seq= []
-                s0= self.world_model.init_state(B)
-                for t in range(T):
-                    nxt, stt_stats= self.world_model.rssm(s0, actions[:, t, :], obs[:, t, :])
-                    lat_seq.append(torch.cat([nxt[0], nxt[1], nxt[2]], dim=-1).unsqueeze(1))
-                    s0= nxt
-                lat_seq= torch.cat(lat_seq, dim=1) # [B,T, lat_dim]
+            # Logging
+            merged = {}
+            for k, v in wm_metrics.items():
+                merged[f"wm_{k}"] = v
+            for k, v in ib_metrics.items():
+                # Nur float-fähige Metriken
+                if isinstance(v, (int, float, np.number, torch.Tensor)):
+                    merged[f"ib_{k}"] = float(v)
+            merged["global_step"] = self.global_step
+            logs.append(merged)
+            print(logs)
 
-                # Intrinsic => plan2explore
-                s0= self.world_model.init_state(B)
-                int_rews_list=[]
-                for t in range(T):
-                    d1c,d2c, stc= s0
-                    feat_c= torch.cat([d1c,d2c, stc, actions[:,t,:]], dim=-1)
-                    disagree= self.plan2explore.disagreement(feat_c).squeeze(-1)
-                    int_rews_list.append(disagree)
-                    nx, stt_s= self.world_model.rssm(s0, actions[:,t,:], obs[:,t,:])
-                    s0= nx
-                int_rews= torch.stack(int_rews_list, dim=1)
+            self.global_step += 1
 
-                extr_scaled= self.alpha_ext*normed_rewards
-                int_scaled = self.alpha_int*int_rews
-                total_rw= extr_scaled + int_scaled
-
-                # Lambda-return
-                dones_mask = (1. - dones)
-                values = self.critic(lat_seq).detach()
-                G = torch.zeros_like(total_rw).to(device)
-                lam = self.cfg["lambda_"]
-                gam = self.cfg["discount"]
-                for t in reversed(range(T)):
-                    if t == T - 1:
-                        G[:, t] = total_rw[:, t] + gam * dones_mask[:, t] * values[:, t]
-                    else:
-                        G[:, t] = total_rw[:, t] + gam * dones_mask[:, t] * (
-                                (1. - lam) * values[:, t + 1] + lam * G[:, t + 1]
-                        )
-                # Return normalization
-                self.return_rms.update(G.detach().cpu().numpy().reshape(-1))
-
-                meanR_t = torch.tensor(self.return_rms.mean, device=G.device, dtype=G.dtype)
-                stdR_t = torch.tensor(self.return_rms.std, device=G.device, dtype=G.dtype)
-
-                Rnorm = (G - meanR_t) / (stdR_t + 1e-8)
-
-            vals_c = self.critic(lat_seq)  # [B,T]
-            # Weighted IS for critic
-            critic_losses = (F.mse_loss(vals_c, Rnorm, reduction='none') * IS_w.view(-1, 1)).mean()
-            self.critic_opt.zero_grad()
-            critic_losses.backward()
-            adaptive_gradient_clipping(self.critic_params, clip_factor=self.cfg["agc_clip"])
-            self.critic_opt.step()
-
-            # ----------------------------------------------------------------
-            # Actor => multi-step
-            # ----------------------------------------------------------------
-            actor_loss= self._multi_step_actor_loss(lat_seq.reshape(B*T, -1))
-            self.actor_opt.zero_grad()
-            actor_loss.backward()
-            adaptive_gradient_clipping(self.actor_params, clip_factor=self.cfg["agc_clip"])
-            self.actor_opt.step()
-
-            # ----------------------------------------------------------------
-            # trust region => KL => alpha_ext, alpha_int
-            # minimal demonstration
-            mean_kl= klv
-            diff= mean_kl - self.cfg["target_kl"]
-            hinge= F.relu(diff).detach()
-            alpha_loss_ext= self.log_alpha_ext*hinge*self.cfg["trust_region_scale"]
-            alpha_loss_int= self.log_alpha_int*hinge*self.cfg["trust_region_scale"]
-            self.opt_alpha_ext.zero_grad()
-            alpha_loss_ext.backward(retain_graph=True)
-            self.opt_alpha_ext.step()
-            self.opt_alpha_int.zero_grad()
-            alpha_loss_int.backward()
-            self.opt_alpha_int.step()
-
-            # ----------------------------------------------------------------
-            # LR sched
-            # ----------------------------------------------------------------
-            self.global_step+=1
-            self.wm_sched.step()
-            self.ens_sched.step()
-            self.actor_sched.step()
-            self.critic_sched.step()
-
-            logs.append({
-                "wm_loss": wm_loss_val/T,
-                "ens_loss": ens_loss_val/T,
-                "critic_loss": critic_losses.item(),
-                "actor_loss": actor_loss.item(),
-                "alpha_ext": float(self.alpha_ext.item()),
-                "alpha_int": float(self.alpha_int.item()),
-                "mean_kl": mean_kl.item(),
-            })
         return logs
 
-    def _multi_step_actor_loss(self, init_latents):
-        """
-        Multi-step imagination using the slow RSSM prior for stable rollouts.
-        Summation of (value + alpha_int * KL) along horizon, then negative.
-        """
-        B_ = init_latents.shape[0]
-        d= self.cfg["deter_dim"]
-        s= self.cfg["stoch_dim"]
-        d1= init_latents[:, :d]
-        d2= init_latents[:, d:2*d]
-        st= init_latents[:, 2*d:2*d+s]
-
-        horizon= self.cfg["actor_horizon"]
-        discount= 1.0
-        total_val= 0.0
-        for _ in range(horizon):
-            lat= torch.cat([d1,d2,st], dim=-1)
-            act, dist= self.actor(lat, sample=True)
-            if not self.is_discrete:
-                act_in= act
-            else:
-                oh= F.one_hot(act.long(), num_classes=self.act_dim).float()
-                act_in= oh
-
-            # use slow RSSM prior
-            catd= torch.cat([d1,d2], dim=-1)
-            prior_out= self.slow_rssm.rssm.prior_net(catd)
-            pm, plv= torch.chunk(prior_out,2,dim=-1)
-            st_next= pm + torch.exp(0.5*plv)*torch.randn_like(pm)
-
-            # RNN steps
-            x1= torch.cat([st, act_in], dim=-1)
-            d1_next= self.slow_rssm.rssm.rnn1(x1, d1)
-            d2_next= self.slow_rssm.rssm.rnn2(d1_next, d2)
-
-            lat_next= torch.cat([d1_next, d2_next, st_next], dim=-1)
-            val= self.critic(lat_next).mean()
-            # alpha_int * KL
-            kl_intr= 0.5*(plv.exp() + pm.pow(2) - plv -1).sum(dim=-1).mean()
-            rew= val + self.alpha_int*kl_intr
-            total_val+= discount*rew
-            discount*= self.cfg["discount"]
-            # update states
-            d1= d1_next
-            d2= d2_next
-            st= st_next
-
-        return -total_val
-
-    def compute_reconstruction_metrics(self, d1, d2, st, true_obs):
-        """
-        Pseudocode for e.g. SSIM or MSE with the image_decoder.
-        This is a placeholder. Adjust to your data or real model.
-        """
-        if (not self.cfg["use_decoder"]) or (self.world_model.image_decoder is None):
-            return {}
-        recon = self.world_model.decode(d1, d2, st)
-        if recon is None:
-            return {}
-        # Suppose true_obs shape is (B,3,64,64), in [0,1].
-        # We do MSE:
-        mse_val = F.mse_loss(recon, true_obs)
-        # Pseudocode for SSIM or something else:
-        # ssim_val = ssim_function(recon, true_obs)
-        return {"recon_mse": mse_val.item()}
-
-    @torch.no_grad()
-    def evaluate_latents(self, env, episodes=1, max_steps=200):
-        """
-        Example method to evaluate latent space or do reconstruction.
-        We track the real latent sequence by using the posterior update each step with env obs.
-        Then optionally decode images or compute metrics.
-        """
-        results = []
-        for ep in range(episodes):
-            obs, info = env.reset()
-            # We'll do a B=1 init
-            state = self.world_model.init_state(batch_size=1)
-            ep_latents = []
-            ep_metrics = []
-            ep_reward = 0.0
-            for t in range(max_steps):
-                obs_t = torch.tensor(obs, dtype=torch.float32, device=device).unsqueeze(0)
-                # We'll do a "posterior" step => pass real obs to RSSM
-                # We also need an action => ephemeral.
-                # For purely collecting latents, set action=0
-                # or sample from actor. Let's do actor:
-                lat_feat = torch.cat([state[0], state[1], state[2]], dim=-1)
-                action, dist = self.actor(lat_feat, sample=False)
-                if not self.is_discrete:
-                    action_real = (action*self.action_scale + self.action_bias).cpu().numpy()[0]
-                else:
-                    action_real = int(action.cpu().numpy()[0])
-                next_obs, reward, done, trunc, info = env.step(action_real)
-                ep_reward+= reward
-
-                # RSSM posterior => next state
-                next_st, stats = self.world_model.rssm(state, torch.tensor(action_real, dtype=torch.float32, device=device).unsqueeze(0), obs_t)
-                ep_latents.append(next_st)
-
-                # Optionally compute reconstruction metrics:
-                # d1,d2,st => decode => compare to obs
-                # if obs is an image, let's say shape [3,64,64]
-                if self.cfg["use_decoder"]:
-                    # We do a placeholder
-                    # we must reshape obs to [B,C,H,W], scaled in [0,1].
-                    # MSE or SSIM...
-                    d1, d2, stc = next_st
-                    d1, d2, stc = d1.detach(), d2.detach(), stc.detach()
-                    # if your obs is e.g. 64x64x3, rearrange => (3,64,64).
-                    # ignoring potential shape mismatch
-                    obs_norm = torch.tensor(next_obs, dtype=torch.float32, device=device).unsqueeze(0).permute(0,3,1,2)/255.0
-                    # We do a quick check:
-                    recons = self.compute_reconstruction_metrics(d1, d2, stc, obs_norm)
-                    ep_metrics.append(recons)
-
-                if done or trunc:
-                    break
-                obs = next_obs
-                state = next_st
-            results.append({"episode_reward": ep_reward, "latent_sequence": ep_latents, "metrics": ep_metrics})
-        return results
-
     def state(self):
+        """
+        Gibt Checkpoint-Daten zurück (Modellgewichte, global_step, etc.).
+        """
         return {
             "world_model": self.world_model.state_dict(),
-            "slow_rssm": self.slow_rssm.state_dict(),
-            "plan2explore": self.plan2explore.state_dict(),
-            "actor": self.actor.state_dict(),
-            "critic": self.critic.state_dict(),
-            "log_alpha_ext": self.log_alpha_ext.data.clone(),
-            "log_alpha_int": self.log_alpha_int.data.clone(),
-            "opt_alpha_ext": self.opt_alpha_ext.state_dict(),
-            "opt_alpha_int": self.opt_alpha_int.state_dict(),
-            "wm_opt": self.wm_opt.state_dict(),
-            "ens_opt": self.ens_opt.state_dict(),
-            "actor_opt": self.actor_opt.state_dict(),
-            "critic_opt": self.critic_opt.state_dict(),
+            "imag_behavior": self.imag_behavior.state_dict(),
+            "_expl_behavior": (
+                self._expl_behavior.state_dict()
+                if hasattr(self._expl_behavior, "state_dict")
+                else None
+            ),
             "global_step": self.global_step
         }
 
     def restore_state(self, ckpt):
+        """
+        Stellt Modellgewichte etc. aus ckpt wieder her.
+        """
         self.world_model.load_state_dict(ckpt["world_model"])
-        self.slow_rssm.load_state_dict(ckpt["slow_rssm"])
-        self.plan2explore.load_state_dict(ckpt["plan2explore"])
-        self.actor.load_state_dict(ckpt["actor"])
-        self.critic.load_state_dict(ckpt["critic"])
-        self.log_alpha_ext.data.copy_(ckpt["log_alpha_ext"])
-        self.log_alpha_int.data.copy_(ckpt["log_alpha_int"])
-
-        self.opt_alpha_ext.load_state_dict(ckpt["opt_alpha_ext"])
-        self.opt_alpha_int.load_state_dict(ckpt["opt_alpha_int"])
-        self.wm_opt.load_state_dict(ckpt["wm_opt"])
-        self.ens_opt.load_state_dict(ckpt["ens_opt"])
-        self.actor_opt.load_state_dict(ckpt["actor_opt"])
-        self.critic_opt.load_state_dict(ckpt["critic_opt"])
-        self.global_step= ckpt["global_step"]
+        self.imag_behavior.load_state_dict(ckpt["imag_behavior"])
+        if ckpt.get("_expl_behavior") and hasattr(self._expl_behavior, "load_state_dict"):
+            self._expl_behavior.load_state_dict(ckpt["_expl_behavior"])
+        self.global_step = ckpt["global_step"]

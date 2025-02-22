@@ -66,7 +66,7 @@ from hockey.hockey_env import Mode, HockeyEnv_BasicOpponent, HumanOpponent, Basi
 
 # Import your Dreamer trainer
 from models.dreamer.DREAMTrainer import DreamerV3Trainer
-from models.dreamer.DREAM import VectorDecoder
+#from models.dreamer.DREAM import VectorDecoder
 
 
 
@@ -338,14 +338,14 @@ def evaluate_imagined_rollouts(trainer, output_dir: Path, device='cpu'):
             pred_reward_list.append(r_pred.item())
 
             # decode st_pred => predicted observation
-            if trainer.agent.world_model.use_decoder and trainer.agent.world_model.decoder is not None:
-                # we decode with st_pred to see open-loop
-                d1_n, d2_n = next_state_post[0], next_state_post[1]
-                latent_for_decode = torch.cat([d1_n, d2_n, st_pred], dim=-1)  # shape [1, deter*2 + stoch]
-                obs_dec = trainer.agent.world_model.decoder(latent_for_decode)  # shape [1, obs_dim]
-                obs_pred_list.append(obs_dec.cpu().numpy().squeeze(0))  # (obs_dim,)
-            else:
-                obs_pred_list.append(None)
+#            if trainer.agent.world_model.use_decoder and trainer.agent.world_model.decoder is not None:
+#                # we decode with st_pred to see open-loop
+#                d1_n, d2_n = next_state_post[0], next_state_post[1]
+#                latent_for_decode = torch.cat([d1_n, d2_n, st_pred], dim=-1)  # shape [1, deter*2 + stoch]
+#                obs_dec = trainer.agent.world_model.decoder(latent_for_decode)  # shape [1, obs_dim]
+#                obs_pred_list.append(obs_dec.cpu().numpy().squeeze(0))  # (obs_dim,)
+#            else:
+#                obs_pred_list.append(None)
 
             state_post = next_state_post
             obs = next_obs
@@ -576,6 +576,10 @@ def main():
     env_name = training_config["environment"]["name"]
     model_config = training_config["model"]["config"]
 
+
+
+
+
     # 1) Evaluate world model for all .pth
     print("=== Step 1: Evaluate the world model for ALL saved models ===")
     wm_results = evaluate_world_model_all(
@@ -586,6 +590,8 @@ def main():
         num_eval_steps=args.num_steps_worldmodel,
         device=device
     )
+
+
 
     print("\nWorld Model Evaluation Results (All Models):")
     wm_log = evaluation_dir / "world_model_evaluation_summary.txt"
@@ -608,8 +614,15 @@ def main():
     trainer.agent.restore_state(checkpoint)
     print(f"Loaded model from {chosen_model_path}")
 
+
+
     # Create subfolders for the chosen model
     out_dirs = _create_model_output_dirs(evaluation_dir, chosen_model_name)
+
+    if args.record_gifs:
+        create_gif_vs_opponent(trainer, out_dirs["gifs"], opponent_weak=True, gif_name="dreamer_vs_weak.gif")
+        create_gif_vs_opponent(trainer, out_dirs["gifs"], opponent_weak=False, gif_name="dreamer_vs_strong.gif")
+
 
     # Evaluate latents
     if args.evaluate_latents:
