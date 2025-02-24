@@ -166,6 +166,11 @@ rl_experiments/experiments/
 experiments/
 wandb/
 gifs/
-
+experiment_evaluation/
+*.ipynb
+*.pkl
+*.csv
+*.pth
+*.sh
 # Ignore singularity container
 optimal-puck.sif
