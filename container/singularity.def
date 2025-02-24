@@ -5,7 +5,21 @@ From: python:3.11-slim
     requirements.txt /opt/requirements.txt
 
 %post
+    # Update and install necessary build tools
+    apt-get update && apt-get install -y \
+        git \
+        wget \
+        unzip \
+        build-essential \
+        swig \
+        && apt-get clean
+
     pip install --no-cache-dir -r /opt/requirements.txt
+
+    pip install --upgrade pip
+
+    # Install hockey-env
+    pip install git+https://github.com/martius-lab/hockey-env.git
 
 %environment
     export LC_ALL=C
