@@ -21,7 +21,7 @@ import sys
 from pathlib import Path
 
 from hockey.hockey_env import HockeyEnv_BasicOpponent, Mode, HockeyEnv, BasicOpponent
-from models.ddpg.DDPG_PER import DDPGAgent
+from models.ddpg.DDPG import DDPGAgent
 
 
 class DDPGTrainer:
