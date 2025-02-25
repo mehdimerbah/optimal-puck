@@ -114,6 +114,7 @@ class DDPGTrainer:
         self.training_stats_path = self.results_path / "training" / "stats"
         self.training_logs_path = self.results_path / "training" / "logs"
         self.training_plots_path = self.results_path / "training" / "plots"
+        ## Create directories if they do not exist to avoid errors
         self.training_stats_path.mkdir(parents=True, exist_ok=True)
         self.training_logs_path.mkdir(parents=True, exist_ok=True)
         self.training_plots_path.mkdir(parents=True, exist_ok=True)
@@ -125,7 +126,7 @@ class DDPGTrainer:
         Returns:
             DDPGAgent: An initialized agent.
         """
-        # Ensure the action space matches expected dimensions.
+        # Ensure the action space matches expected dimensions
         correct_action_space = gym.spaces.Box(low=-1, high=1, shape=(4,), dtype=np.float32)
         agent = DDPGAgent(
             observation_space=self.env.observation_space,
@@ -140,7 +141,7 @@ class DDPGTrainer:
         """
         saved_models_dir = self.results_path / "training" / "saved_models"
         checkpoint_files = list(saved_models_dir.glob("DDPG_*_checkpoint_ep*.pth"))
-        # Sort checkpoints by episode number extracted from filename.
+        # Sort checkpoints by episode number extracted from filename
         checkpoint_files.sort(key=lambda path: int(path.stem.split("ep")[-1]))
         self.opponent_pool = checkpoint_files
 
@@ -379,7 +380,7 @@ class DDPGTrainer:
             episode_reward = 0
             win = 0
             touched = 0
-            first_time_touch = 1
+            first_touch = 1
 
             for t in range(max_timesteps):
                 self.timestep += 1
@@ -391,8 +392,8 @@ class DDPGTrainer:
                                   2 * _info.get('reward_closeness_to_puck', 0) +
                                   2 * _info.get('reward_puck_direction', 0) -
                                   (1 - touched) * 0.1 +
-                                  touched * first_time_touch * 0.01 * t)
-                first_time_touch = 1 - touched
+                                  touched * first_touch * 0.01 * t)
+                first_touch = 1 - touched
 
                 self.agent.store_transition((obs, action, current_reward, next_obs, done))
                 obs = next_obs
@@ -461,8 +462,8 @@ class DDPGTrainer:
         self.logger.info(f"Environment: {self.env_name}, max_episodes={max_episodes}, "
                          f"max_timesteps={max_timesteps}, train_iter={train_iter}")
 
-        pool_update_interval = 10
-        min_basic_opponent_training = 100
+        pool_update_interval = 100
+        min_basic_opponent_training = 10000
 
         for i_episode in range(1, max_episodes + 1):
             obs, _info = self.env.reset()
@@ -470,7 +471,7 @@ class DDPGTrainer:
             episode_reward = 0
             win = 0
             touched = 0
-            first_time_touch = 1
+            first_touch = 1
 
             if i_episode % pool_update_interval == 0 and i_episode > min_basic_opponent_training:
                 self._update_opponent_pool()
@@ -496,9 +497,9 @@ class DDPGTrainer:
                 current_reward = (reward +
                                   2 * _info.get('reward_closeness_to_puck', 0) -
                                   (1 - touched) * 0.1 +
-                                  touched * first_time_touch * 0.01 * t +
+                                  touched * first_touch * 0.01 * t +
                                   2 * _info.get('reward_puck_direction', 0))
-                first_time_touch = 1 - touched
+                first_touch = 1 - touched
 
                 self.agent.store_transition((obs_agent1, act1, current_reward, next_obs, done))
                 obs = next_obs

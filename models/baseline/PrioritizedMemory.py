@@ -53,7 +53,7 @@ class PrioritizedMemory():
         
         # Compute importance-sampling (IS) weights
         is_weights = (self.size * sample_probabilities[indices]) ** (-beta)
-        # Normalize weights (optional but common practice)
+        # Normalize weights
         is_weights /= is_weights.max()
         
         return samples, indices, is_weights
