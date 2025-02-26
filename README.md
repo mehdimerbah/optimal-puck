@@ -46,7 +46,7 @@ The `rl_experiments` folder contains:
 
 ### Generating and Experiment
 
-    To generate an experiment, run:  
+To generate an experiment, run:  
 
 ```bash
 python rl_experiments/scripts/generate_experiment.py --config rl_experiments/configs/<CONFIG_FILE>
