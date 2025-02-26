@@ -1,6 +1,6 @@
 # optimal-puck
 
-**optimal-puck** is a research repository for running reinforcement learning experiments on the LaserHockey environment for the Reinforcement Learning course by Dr. [Georg martius](https://uni-tuebingen.de/fakultaeten/mathematisch-naturwissenschaftliche-fakultaet/fachbereiche/informatik/lehrstuehle/distributed-intelligence/team/prof-dr-georg-martius/). It implements and evaluates the DDPG and TD3  algorithms supports both standard and self-play training setups. The repo also provides evaluation tools, and a framework for hyperparameter sweeps and curriculum learning.
+**optimal-puck** is a research repository for running reinforcement learning experiments on the LaserHockey environment for the [Reinforcement Learning course](https://uni-tuebingen.de/fakultaeten/mathematisch-naturwissenschaftliche-fakultaet/fachbereiche/informatik/lehrstuehle/distributed-intelligence/teaching/lectures/reinforcement-learning-lecture-ws-202425/) by Dr. [Georg Martius](https://uni-tuebingen.de/fakultaeten/mathematisch-naturwissenschaftliche-fakultaet/fachbereiche/informatik/lehrstuehle/distributed-intelligence/team/prof-dr-georg-martius/). It implements and evaluates the DDPG and TD3  algorithms supports both standard and self-play training setups. The repo also provides evaluation tools, and a framework for hyperparameter sweeps and curriculum learning.
 
 ## Features
 
