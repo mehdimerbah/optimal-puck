@@ -7,7 +7,10 @@ This module provides an implementation of the DDPG algorithm with:
   - Exploration via Ornstein-Uhlenbeck noise.
   - Prioritized experience replay for improved sample efficiency.
   
-The design follows a modular approach similar to the provided TD3 example.
+This implementation is based on the following papers and ideas:
+    - "Continuous control with deep reinforcement learning" by Lillicrap et al.
+    - "Prioritized Experience Replay" by Schaul et al.
+    - "Ornstein-Uhlenbeck Noise" by Uhlenbeck and Ornstein.
 """
 
 import torch
