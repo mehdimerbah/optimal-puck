@@ -1,0 +1,73 @@
+environment:
+  name: "HockeyEnv"
+  max_episode_steps: 250  # Default episode length
+
+training:
+  max_episodes: 50000
+  max_timesteps: 1000
+  seed: 42
+  log_interval: 50
+  save_interval: 500
+  render: false
+  train_iter: 64
+  performance_window: 50
+  curriculum:
+    initial_weights:
+      random: 1.0
+      weak: 0.0
+      strong: 0.0
+      self: 0.0
+    phase_transition_criteria:
+      phase1_to_phase2:
+        win_rate: 0.4
+        reward_std: 0.25
+        min_episodes: 200
+      phase2_to_phase3:
+        weak_win_rate: 0.55
+        reward_std: 0.2
+        min_episodes: 300
+      phase3_to_phase4:
+        strong_win_rate: 0.65
+        reward_std: 0.15
+        min_episodes: 400
+    dynamic_adjustment:
+      weak_win_rate_threshold: 0.6
+      strong_win_rate_threshold: 0.7
+      self_win_rate_threshold: 0.75
+      weight_adjustment_step: 0.03
+      min_weights:
+        random: 0.1
+        weak: 0.1
+        strong: 0.2
+        self: 0.1
+
+model:
+  name: "TD3"
+  config:
+    batch_size: 256
+    discount: 0.93
+    learning_rate_actor: 0.00032
+    learning_rate_critic: 0.00086
+    policy_noise: 0.25
+    noise_clip: 0.39
+    policy_delay: 2
+    polyak: 0.993
+    warmup_steps: 35000
+    reward_shaping:
+      aim_threshold: 0.6
+      aim_multiplier: 2.7
+      defend_multiplier: 2.2
+      block_multiplier: 1.2
+      touch_multiplier: 4.6
+      closeness_multiplier: 3.7
+      max_defense_distance: 100.0
+      max_offset: 20.0
+      wall_threshold: 0.8
+      wall_multiplier: 0.5
+
+evaluation:
+  n_episodes: 10
+  max_steps_per_episode: 250
+  metrics:
+    - "mean_return"
+    - "episode_length" 
