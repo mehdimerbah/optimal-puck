@@ -1,1 +1,2 @@
-# Add Python dependencies
+## Install HockeyEnv
+hockey @ git+https://git@github.com/martius-lab/hockey-env.git
