@@ -45,7 +45,7 @@ The `rl_experiments` folder contains:
 - **scripts:** Utilities to generate experiments, initiate training, and conduct hyperparameter sweeps.
 
 ### Generating and Experiment
-  To generate an experiment, run:
+  To generate an experiment, run:  
     ```bash
   python rl_experiments/scripts/generate_experiment.py --config rl_experiments/configs/<CONFIG_FILE>```
   
