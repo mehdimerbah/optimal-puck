@@ -19,7 +19,7 @@ mehdimerbah-optimal-puck/
 ├── LICENSE                    # MIT License.
 ├── requirements.txt           # Python dependencies for the main repo.
 ├── container/                 # Container-specific files:
-│   ├── OptimalPuck_16-01-2025_TD3_LunarLander.sbatch  # Example SLURM job script.
+│   ├── optima_puck_slurm_job.sbatch  # Example SLURM job script.
 │   ├── requirements.txt       # Container dependencies.
 │   └── singularity.def        # Singularity definition file.
 ├── evaluation/                # Evaluation scripts and checkpoints for DDPG and TD3.
@@ -47,8 +47,8 @@ The `rl_experiments` folder contains:
 ### Generating and Experiment
   To generate an experiment, run:
     ```bash
-  python rl_experiments/scripts/generate_experiment.py --config rl_experiments/configs/<CONFIG_FILE>
-  ```
+  python rl_experiments/scripts/generate_experiment.py --config rl_experiments/configs/<CONFIG_FILE>```
+  
 ### Running Training
 
 - **Standard Training:**
