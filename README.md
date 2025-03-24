@@ -1,6 +1,6 @@
 # optimal-puck
 
-**optimal-puck** is a research repository for running reinforcement learning experiments on the LaserHockey environment for the [Reinforcement Learning course](https://uni-tuebingen.de/fakultaeten/mathematisch-naturwissenschaftliche-fakultaet/fachbereiche/informatik/lehrstuehle/distributed-intelligence/teaching/lectures/reinforcement-learning-lecture-ws-202425/) by Dr. [Georg Martius](https://uni-tuebingen.de/fakultaeten/mathematisch-naturwissenschaftliche-fakultaet/fachbereiche/informatik/lehrstuehle/distributed-intelligence/team/prof-dr-georg-martius/). It implements and evaluates the DDPG and TD3  algorithms supports both standard and self-play training setups. The repo also provides evaluation tools, and a framework for hyperparameter sweeps and curriculum learning.
+**optimal-puck** is a research repository for running reinforcement learning experiments on the LaserHockey environment for the [Reinforcement Learning course](https://uni-tuebingen.de/fakultaeten/mathematisch-naturwissenschaftliche-fakultaet/fachbereiche/informatik/lehrstuehle/distributed-intelligence/teaching/lectures/reinforcement-learning-lecture-ws-202425/) by Dr. [Georg Martius](https://uni-tuebingen.de/fakultaeten/mathematisch-naturwissenschaftliche-fakultaet/fachbereiche/informatik/lehrstuehle/distributed-intelligence/team/prof-dr-georg-martius/). It provides the implementations and training, tuning and evaluation pipelines for the DDPG and TD3 algorithms and supports both standard and self-play setups. 
 
 ## Features
 - **Experimental Setup:** Predefined configurations and scripts for generating and running reproducible RL experiments.
@@ -83,4 +83,4 @@ This project is licensed under the MIT License. See [LICENSE](./LICENSE) for det
 
 ## Acknowledgments
 
-The repository includes code and ideas inspired by research papers on RL (e.g., DDPG, TD3, Dreamer) as well as contributions from Mehdi Merbah, Thomas Vogel, and Michael Maier.
+The repository includes code and ideas inspired by the original research papers (DDPG, TD3 and Dreamer) as well as contributions from Mehdi Merbah, Thomas Vogel, and Michael Maier.
