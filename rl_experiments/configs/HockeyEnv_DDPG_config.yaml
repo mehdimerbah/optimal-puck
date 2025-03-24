@@ -3,7 +3,7 @@ environment:
   max_episode_steps: 250
   
 training:
-  max_episodes: 10000        
+  max_episodes: 30000        
   max_timesteps: 250        
   seed: 42                  
   log_interval: 20          
@@ -16,10 +16,10 @@ model:
   name: "DDPG"
     # DDPG-specific hyperparameters
   wandb_sweep_config:
-    name: "HockeyEnv_DDPG_EpsilonGreedyStrategy"
+    name: "HockeyEnv_DDPG"
     method: "grid"
     metric:
-      name: "average_reward"
+      name: "average_wins"
       goal: "maximize"
     parameters:
       batch_size:
@@ -29,12 +29,16 @@ model:
       learning_rate_critic:
         values: [1e-4]
       discount:
-        values: [0.95, 0.99]
+        values: [0.95]
       noise_scale:
-        values: [0.1, 0.2, 0.3]
+        values: [0.1]
+      beta:
+        values: [0.4]
+      prioritized:
+        values: [True]
 
 evaluation:
-  n_episodes: 10
+  n_episodes: 100
   max_steps_per_episode: 250
   metrics:
     - "mean_return"

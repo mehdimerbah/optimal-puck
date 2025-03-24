@@ -23,15 +23,17 @@ model:
       goal: "maximize"
     parameters:
       batch_size:
-        values: [128]
+        values: [64, 128]
       learning_rate_actor:
-        values: [1e-4]
+        values: [1e-4, 1e-3]
       learning_rate_critic:
-        values: [1e-4]
+        values: [1e-4, 1e-3]
       discount:
-        values: [0.95, 0.99]
+        values: [0.90, 0.95, 0.99]
       noise_scale:
         values: [0.1, 0.2, 0.3]
+      beta:
+        values: [0.3, 0.4]
 
 evaluation:
   n_episodes: 10

@@ -172,5 +172,10 @@ experiment_evaluation/
 *.csv
 *.pth
 *.sh
+*.png
+*.gif
 # Ignore singularity container
 optimal-puck.sif
+
+# Ignore macOS system files
+.DS_Store
